@@ -6,14 +6,27 @@ from functools import reduce
 import torch.nn.functional as F
 import numpy as np
 import sys
+import argparse
 
 print("WARNING not saving model")
 #print("WARNING not printing intermediates")
 
-no_examples = int(sys.argv[1])
-network_type = sys.argv[2]
-save_model = sys.argv[3][0].lower() == 't'
-print_intermediates = sys.argv[4][0].lower() == 't'
+parser = argparse.ArgumentParser(description='Train supervised IRL models')
+parser.add_argument('--no-examples', type=int, default=100000,
+                    help='Number of training examples')
+parser.add_argument('--network-type', type=str, default='transformer',
+                    help='Type of network to train')
+parser.add_argument('--save-model', action='store_true', 
+                    help='Type of network to train')
+parser.add_argument('--print-intermediates', action='store_true', 
+                    help='Print training information')
+
+args = parser.parse_args()
+
+no_examples = args.no_examples
+network_type = args.network_type
+save_model = args.save_model
+print_intermediates = args.print_intermediates
 print('no_examples', no_examples)
 print('network_type', network_type)
 print('save_model', save_model)

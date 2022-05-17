@@ -2,6 +2,7 @@ from new_block_env import *
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 import numpy as np
 
 class Net(nn.Module):
@@ -36,10 +37,10 @@ training = examples[0:training_split]
 validation = examples[training_split:]
 loss_func = nn.CrossEntropyLoss()
 
-for epoch in range(50):
+for epoch in tqdm(range(50)):
   random.shuffle(training)
   avg_loss = 0
-  for example in training:
+  for example in tqdm(training):
     optimizer.zero_grad()
     data = F.one_hot(torch.Tensor(example["data"]).long(), num_classes=4).view(-1, 100).unsqueeze(dim=0).float()
     label = (torch.Tensor(example["rgb_decode"][1:]).long()).unsqueeze(dim=0)

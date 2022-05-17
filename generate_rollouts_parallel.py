@@ -1,5 +1,3 @@
-print("NOTE run with python3.6 on base conda environment in october_miniconda_install")
-
 import numpy as np
 import stable_baselines3
 import ray
@@ -31,7 +29,7 @@ def get_examples(n_threads):
         model = stable_baselines3.PPO.load("models/" + st, env)
 
         print("Done")
-        for _ in range(100//n_threads):
+        for _ in range(10000//n_threads):
           example_obs = []
           obs = env.reset()
           for i in range(150):
@@ -41,10 +39,12 @@ def get_examples(n_threads):
           example = {"key": listt, "data": np.array(example_obs), "rgb_decode": env.rgb_decode}
           examples.append(example)
           print("\rExamples:", len(examples), end="")
+          if psutil.virtual_memory().percent > 95:
+              exit()
         print("")
     return examples
 
-n_threads = psutil.cpu_count()
+n_threads = min(16, psutil.cpu_count())
 all_examples = []
 ray.init(num_cpus=n_threads)
 # ray.init()
