@@ -3,8 +3,8 @@ import stable_baselines3
 import ray
 import psutil
 import argparse
-from new_block_env import *
-from new_block_env_regression import *
+import new_block_env 
+import new_block_env_regression 
 import os
 
 @ray.remote
@@ -17,18 +17,18 @@ def get_examples(n_examples):
             listt = []
             st = ""
             for i in range(npos):
-                listt.append(BlockType.POSITIVE)
+                listt.append(new_block_env.BlockType.POSITIVE)
                 st += "positive_"
             for i in range(nneu):
-                listt.append(BlockType.NEUTRAL)
+                listt.append(new_block_env.BlockType.NEUTRAL)
                 st += "neutral_"
             for i in range(nneg):
-                listt.append(BlockType.NEGATIVE)
+                listt.append(new_block_env.BlockType.NEGATIVE)
                 st += "negative_"
             st = st[:-1]
 
             print("Loading", st)
-            env = NewBlockEnv(listt)
+            env = new_block_env.NewBlockEnv(listt)
             model = stable_baselines3.PPO.load("models/" + st, env)
 
             print("Done")
@@ -52,11 +52,11 @@ def get_examples_regression(n_examples, non_linear=False):
     def string_to_block_type(st):
         st = st.lower()
         if st == 'negative':
-            return BlockType.NEGATIVE
+            return new_block_env_regression.BlockType.NEGATIVE
         elif st == 'positive':
-            return BlockType.POSITIVE
+            return new_block_env_regression.BlockType.POSITIVE
         elif st == 'neutral':
-            return BlockType.NEUTRAL
+            return new_block_env_regression.BlockType.NEUTRAL
         raise RuntimeError("Unknown block type")
 
     models_directory = "models_regression"
@@ -72,7 +72,7 @@ def get_examples_regression(n_examples, non_linear=False):
         print("Loading", model_name)
         print("Types", block_types)
         print("Powers", block_powers)
-        env = NewBlockEnv(block_types, block_powers)
+        env = new_block_env_regression.NewBlockEnv(block_types, block_powers)
         model = stable_baselines3.PPO.load(models_directory + "/" + model_name, env)
 
         print("Done")
@@ -82,7 +82,7 @@ def get_examples_regression(n_examples, non_linear=False):
             for i in range(150):
                 action, _states = model.predict(obs)
                 obs, rewards, dones, info = env.step(action)
-                data.append((env.render(mode='rgb').flatten(), rewards))
+                data.append((obs, rewards))
             if non_linear:
                 example = {"block_types": block_types, "block_powers": block_powers, "data": data, "rgb_decode": env.rgb_decode}
             else:
@@ -98,6 +98,7 @@ def parse_args():
     parser.add_argument('--regression', '-r', action='store_true')
     parser.add_argument('--non-linear', '-nl', action='store_true')
     parser.add_argument('--max-threads', '-mt', default=16, type=int)
+    parser.add_argument('--out', '-o', type=str, default='examples')
     args = parser.parse_args()
     return args
 
@@ -118,4 +119,4 @@ else:
 for out in outs:
     all_examples.extend(out)
 
-np.save("examples_test_" + str(len(all_examples)) + ".npy", all_examples)
+np.save(args.out + '_' + str(len(all_examples)) + ".npy", all_examples)

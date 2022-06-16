@@ -162,12 +162,15 @@ class NewBlockEnv(gym.Env):
         elif action == Action.RIGHT:
             self.x += 1
 
-    def step(self, action, alt_reward=[0,0,0]):
+    def step(self, action, alt_reward=[0,0,0], render=False):
         self._take_action(action)
 
         done = self.nsteps > 150
 
-        obs = self._next_observation()
+        if render:
+            obs = self._next_render()
+        else:
+            obs = self._next_observation()
 
         reward, alt_reward_val = self._get_reward(alt_reward = alt_reward)
 
