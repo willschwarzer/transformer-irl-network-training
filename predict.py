@@ -6,21 +6,21 @@ from tqdm import tqdm
 import numpy as np
 
 class Net(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.lstm = nn.LSTM(100, 32, 2, batch_first=True)
-    self.linear1 = nn.Linear(32, 16)
-    self.relu = nn.LeakyReLU()
-    self.linear2 = nn.Linear(16, 9)
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(100, 32, 2, batch_first=True)
+        self.linear1 = nn.Linear(32, 16)
+        self.relu = nn.LeakyReLU()
+        self.linear2 = nn.Linear(16, 9)
 
-  def forward(self, states):
-    x, _ = self.lstm(states)
-    x = x.contiguous().view(-1, 32)[-1]
-    x = self.linear1(x)
-    x = self.relu(x)
-    x = self.linear2(x)
-    x = x.view(-1, 3, 3)
-    return x
+    def forward(self, states):
+        x, _ = self.lstm(states)
+        x = x.contiguous().view(-1, 32)[-1]
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+        x = x.view(-1, 3, 3)
+        return x
 
 examples = np.load("examples_100000.npy", allow_pickle=True)
 print("Found", len(examples), "examples.")
@@ -38,20 +38,20 @@ validation = examples[training_split:]
 loss_func = nn.CrossEntropyLoss()
 
 for epoch in tqdm(range(50)):
-  random.shuffle(training)
-  avg_loss = 0
-  for example in tqdm(training):
-    optimizer.zero_grad()
-    data = F.one_hot(torch.Tensor(example["data"]).long(), num_classes=4).view(-1, 100).unsqueeze(dim=0).float()
-    label = (torch.Tensor(example["rgb_decode"][1:]).long()).unsqueeze(dim=0)
-    prediction = net.forward(data)
-    loss = loss_func(prediction, label)
-    avg_loss += loss.item()
-    loss.backward()
-    optimizer.step()
-  avg_loss /= len(training)
-  print("Finished epoch", epoch, "- avg loss", avg_loss)
-  #torch.save(net.state_dict(), "model.parameters")
+    random.shuffle(training)
+    avg_loss = 0
+    for example in tqdm(training):
+        optimizer.zero_grad()
+        data = F.one_hot(torch.Tensor(example["data"]).long(), num_classes=4).view(-1, 100).unsqueeze(dim=0).float()
+        label = (torch.Tensor(example["rgb_decode"][1:]).long()).unsqueeze(dim=0)
+        prediction = net.forward(data)
+        loss = loss_func(prediction, label)
+        avg_loss += loss.item()
+        loss.backward()
+        optimizer.step()
+    avg_loss /= len(training)
+    print("Finished epoch", epoch, "- avg loss", avg_loss)
+    #torch.save(net.state_dict(), "model.parameters")
 
 
 """

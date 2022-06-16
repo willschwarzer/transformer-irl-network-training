@@ -86,10 +86,9 @@ while not done:
     with open("planedata2/normal_vectors_via_highest_return_" + "_".join(block_types_strings) + ".txt", "w") as f:
         f.write(" ".join([str(x) for x in env.get_reward_weights()]) + "\n")
         f.write("\n".join([" ".join([str(x) for x in normal_vector]) for normal_vector in plane_normal_vectors_via_highest_return]))
-        
+
     #with open("plane_normal_vectors_via_det_action.txt", "w") as f:
     #    f.write(" ".join([str(x) for x in env.get_reward_weights()]) + "\n")
     #    f.write("\n".join([" ".join([str(x) for x in normal_vector]) for normal_vector in plane_normal_vectors_via_det_action]))
 
 print("\rDone")
-    

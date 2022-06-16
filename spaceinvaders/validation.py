@@ -5,21 +5,21 @@ import torch.nn.functional as F
 import numpy as np
 
 class Net(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.lstm = nn.LSTM(100, 32, 2, batch_first=True)
-    self.linear1 = nn.Linear(32, 16)
-    self.relu = nn.LeakyReLU()
-    self.linear2 = nn.Linear(16, 9)
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(100, 32, 2, batch_first=True)
+        self.linear1 = nn.Linear(32, 16)
+        self.relu = nn.LeakyReLU()
+        self.linear2 = nn.Linear(16, 9)
 
-  def forward(self, states):
-    x, _ = self.lstm(states)
-    x = x.contiguous().view(-1, 32)[-1]
-    x = self.linear1(x)
-    x = self.relu(x)
-    x = self.linear2(x)
-    x = x.view(-1, 3, 3)
-    return x
+    def forward(self, states):
+        x, _ = self.lstm(states)
+        x = x.contiguous().view(-1, 32)[-1]
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+        x = x.view(-1, 3, 3)
+        return x
 
 examples = np.load("examples.npy", allow_pickle=True)
 print("Found", len(examples), "examples.")
@@ -38,20 +38,20 @@ validation = examples[training_split:]
 loss_func = nn.CrossEntropyLoss()
 
 with torch.no_grad():
-  for epoch in range(50):
-    random.shuffle(validation)
-    avg_loss = 0
-    n_correct = 0
-    for example in validation:
-      data = F.one_hot(torch.Tensor(example["data"]).long(), num_classes=4).view(-1, 100).unsqueeze(dim=0).float()
-      label = (torch.Tensor(example["rgb_decode"][1:]).long()).unsqueeze(dim=0)
-      prediction = net.forward(data)
-      loss = loss_func(prediction, label)
-      avg_loss += loss.item()
-      n_correct += (torch.argmax(prediction, dim=2) == label).sum().item()
-    avg_loss /= len(validation)
-    print("Finished epoch", epoch, "- avg loss", avg_loss)
-    print("Accuracy", n_correct / (3 * len(validation)))
+    for epoch in range(50):
+        random.shuffle(validation)
+        avg_loss = 0
+        n_correct = 0
+        for example in validation:
+            data = F.one_hot(torch.Tensor(example["data"]).long(), num_classes=4).view(-1, 100).unsqueeze(dim=0).float()
+            label = (torch.Tensor(example["rgb_decode"][1:]).long()).unsqueeze(dim=0)
+            prediction = net.forward(data)
+            loss = loss_func(prediction, label)
+            avg_loss += loss.item()
+            n_correct += (torch.argmax(prediction, dim=2) == label).sum().item()
+        avg_loss /= len(validation)
+        print("Finished epoch", epoch, "- avg loss", avg_loss)
+        print("Accuracy", n_correct / (3 * len(validation)))
 
 
 """

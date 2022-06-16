@@ -8,49 +8,49 @@ import numpy as np
 transformer_dimensions = 100
 
 class PositionalEncoder(nn.Module):
-  def __init__(self, d_model, max_seq_len=151):
-    super().__init__()
-    self.d_model = d_model
-    pe = torch.zeros(max_seq_len, d_model)
-    for pos in range(max_seq_len):
-      for i in range(0, d_model, 2):
-        pe[pos, i] = \
-          math.sin(pos / (10000 ** ((2 * i) / d_model)))
-        pe[pos, i + 1] = \
-          math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
-    pe = pe.unsqueeze(0)
-    self.register_buffer('pe', pe)
+    def __init__(self, d_model, max_seq_len=151):
+        super().__init__()
+        self.d_model = d_model
+        pe = torch.zeros(max_seq_len, d_model)
+        for pos in range(max_seq_len):
+            for i in range(0, d_model, 2):
+                pe[pos, i] = \
+                  math.sin(pos / (10000 ** ((2 * i) / d_model)))
+                pe[pos, i + 1] = \
+                  math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
 
-  def forward(self, x):
-    with torch.no_grad():
-      x = x * math.sqrt(self.d_model)
-      seq_len = x.size(1)
-      pe = self.pe[:, :seq_len]
-      x = x + pe
-      return x
+    def forward(self, x):
+        with torch.no_grad():
+            x = x * math.sqrt(self.d_model)
+            seq_len = x.size(1)
+            pe = self.pe[:, :seq_len]
+            x = x + pe
+            return x
 
 class Net(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.positional_encoder = PositionalEncoder(transformer_dimensions)
-    self.encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dimensions, nhead=10, batch_first=True)
-    self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
-    self.linear1 = nn.Linear(100, 50)
-    self.relu = nn.LeakyReLU()
-    self.linear2 = nn.Linear(50, 9)
+    def __init__(self):
+        super().__init__()
+        self.positional_encoder = PositionalEncoder(transformer_dimensions)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dimensions, nhead=10, batch_first=True)
+        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
+        self.linear1 = nn.Linear(100, 50)
+        self.relu = nn.LeakyReLU()
+        self.linear2 = nn.Linear(50, 9)
 
-  def forward(self, states):
-    x = self.positional_encoder(states)
-    x = self.transformer(x)
-    assert(x.shape[0] == 1)
-    assert(x.shape[1] == 150)
-    assert(x.shape[2] == 100)
-    x = torch.mean(x, dim=1)
-    x = self.linear1(x)
-    x = self.relu(x)
-    x = self.linear2(x)
-    x = x.view(-1, 3, 3)
-    return x
+    def forward(self, states):
+        x = self.positional_encoder(states)
+        x = self.transformer(x)
+        assert(x.shape[0] == 1)
+        assert(x.shape[1] == 150)
+        assert(x.shape[2] == 100)
+        x = torch.mean(x, dim=1)
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+        x = x.view(-1, 3, 3)
+        return x
 
 examples = np.load("examples.npy", allow_pickle=True)
 print("Found", len(examples), "examples.")
@@ -69,20 +69,20 @@ validation = examples[training_split:]
 loss_func = nn.CrossEntropyLoss()
 
 with torch.no_grad():
-  for epoch in range(50):
-    random.shuffle(validation)
-    avg_loss = 0
-    n_correct = 0
-    for example in validation:
-      data = F.one_hot(torch.Tensor(example["data"]).long(), num_classes=4).view(-1, 100).unsqueeze(dim=0).float()
-      label = (torch.Tensor(example["rgb_decode"][1:]).long()).unsqueeze(dim=0)
-      prediction = net.forward(data)
-      loss = loss_func(prediction, label)
-      avg_loss += loss.item()
-      n_correct += (torch.argmax(prediction, dim=1) == label).sum().item()
-    avg_loss /= len(validation)
-    print("Finished epoch", epoch, "- avg loss", avg_loss)
-    print("Accuracy", n_correct / (3 * len(validation)))
+    for epoch in range(50):
+        random.shuffle(validation)
+        avg_loss = 0
+        n_correct = 0
+        for example in validation:
+            data = F.one_hot(torch.Tensor(example["data"]).long(), num_classes=4).view(-1, 100).unsqueeze(dim=0).float()
+            label = (torch.Tensor(example["rgb_decode"][1:]).long()).unsqueeze(dim=0)
+            prediction = net.forward(data)
+            loss = loss_func(prediction, label)
+            avg_loss += loss.item()
+            n_correct += (torch.argmax(prediction, dim=1) == label).sum().item()
+        avg_loss /= len(validation)
+        print("Finished epoch", epoch, "- avg loss", avg_loss)
+        print("Accuracy", n_correct / (3 * len(validation)))
 
 
 """

@@ -83,4 +83,3 @@ def load_environment(envname):
         data = np.load(filename, allow_pickle=True).item()
         fetcher.map[basename] = data
     return fetcher
-

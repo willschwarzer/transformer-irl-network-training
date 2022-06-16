@@ -22,126 +22,126 @@ print('print_intermediates', print_intermediates)
 print('method', method)
 
 def label_from_example(example):
-  ret = []
-  for i in example["rgb_decode"][1:]:
-    if i == BlockType.NEGATIVE:
-      ret.append(-1.)
-    elif i == BlockType.POSITIVE:
-      ret.append(1.)
-    elif i == BlockType.NEUTRAL:
-      ret.append(0.)
-    else:
-      raise RuntimeError("Unknown block type")
-  ret = np.array(ret)
-  if abs(np.linalg.norm(ret)) > 0:
-      ret /= np.linalg.norm(ret)
-  return ret
+    ret = []
+    for i in example["rgb_decode"][1:]:
+        if i == BlockType.NEGATIVE:
+            ret.append(-1.)
+        elif i == BlockType.POSITIVE:
+            ret.append(1.)
+        elif i == BlockType.NEUTRAL:
+            ret.append(0.)
+        else:
+            raise RuntimeError("Unknown block type")
+    ret = np.array(ret)
+    if abs(np.linalg.norm(ret)) > 0:
+        ret /= np.linalg.norm(ret)
+    return ret
 
 transformer_dimensions = 100
 
 class PositionalEncoder(nn.Module):
-  def __init__(self, d_model, max_seq_len=151):
-    super().__init__()
-    self.d_model = d_model
-    pe = torch.zeros(max_seq_len, d_model)
-    for pos in range(max_seq_len):
-      for i in range(0, d_model, 2):
-        pe[pos, i] = \
-          math.sin(pos / (10000 ** ((2 * i) / d_model)))
-        pe[pos, i + 1] = \
-          math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
-    pe = pe.unsqueeze(0)
-    self.register_buffer('pe', pe)
+    def __init__(self, d_model, max_seq_len=151):
+        super().__init__()
+        self.d_model = d_model
+        pe = torch.zeros(max_seq_len, d_model)
+        for pos in range(max_seq_len):
+            for i in range(0, d_model, 2):
+                pe[pos, i] = \
+                  math.sin(pos / (10000 ** ((2 * i) / d_model)))
+                pe[pos, i + 1] = \
+                  math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
 
-  def forward(self, x):
-    with torch.no_grad():
-      x = x * math.sqrt(self.d_model)
-      seq_len = x.size(1)
-      pe = self.pe[:, :seq_len]
-      x = x + pe
-      return x
+    def forward(self, x):
+        with torch.no_grad():
+            x = x * math.sqrt(self.d_model)
+            seq_len = x.size(1)
+            pe = self.pe[:, :seq_len]
+            x = x + pe
+            return x
 
 class TransformerNet(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.positional_encoder = PositionalEncoder(transformer_dimensions)
-    self.encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dimensions, nhead=10, batch_first=True)
-    self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
-    self.linear1 = nn.Linear(100, 50)
-    self.relu = nn.LeakyReLU()
-    self.linear2 = nn.Linear(50, 3)
+    def __init__(self):
+        super().__init__()
+        self.positional_encoder = PositionalEncoder(transformer_dimensions)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dimensions, nhead=10, batch_first=True)
+        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
+        self.linear1 = nn.Linear(100, 50)
+        self.relu = nn.LeakyReLU()
+        self.linear2 = nn.Linear(50, 3)
 
-  def forward(self, states):
-    x = self.positional_encoder(states)
-    x = self.transformer(x)
-    assert(x.shape[1] == 150)
-    assert(x.shape[2] == 100)
-    x = torch.mean(x, dim=1)
-    x = self.linear1(x)
-    x = self.relu(x)
-    x = self.linear2(x)
-    x = x.view(-1, 3)
-    return x
+    def forward(self, states):
+        x = self.positional_encoder(states)
+        x = self.transformer(x)
+        assert(x.shape[1] == 150)
+        assert(x.shape[2] == 100)
+        x = torch.mean(x, dim=1)
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+        x = x.view(-1, 3)
+        return x
 
 class LSTMNet(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.lstm = nn.LSTM(100, 32, 2, batch_first=True)
-    self.linear1 = nn.Linear(32, 16)
-    self.relu = nn.LeakyReLU()
-    self.linear2 = nn.Linear(16, 9)
+    def __init__(self):
+        super().__init__()
+        self.lstm = nn.LSTM(100, 32, 2, batch_first=True)
+        self.linear1 = nn.Linear(32, 16)
+        self.relu = nn.LeakyReLU()
+        self.linear2 = nn.Linear(16, 9)
 
-  def forward(self, states):
-    x, _ = self.lstm(states)
-    batch_size = states.shape[0]
-    x = x[:, -1, :] #x.contiguous().view(batch_size, -1, 32)[-1]
-    x = self.linear1(x)
-    x = self.relu(x)
-    x = self.linear2(x)
-    x = x.view(-1, 3, 3)
-    return x
+    def forward(self, states):
+        x, _ = self.lstm(states)
+        batch_size = states.shape[0]
+        x = x[:, -1, :] #x.contiguous().view(batch_size, -1, 32)[-1]
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+        x = x.view(-1, 3, 3)
+        return x
 
 class MlpNet(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.linear1 = nn.Linear(150*100, 200)
-    self.relu = nn.LeakyReLU()
-    self.linear2 = nn.Linear(200, 9)
+    def __init__(self):
+        super().__init__()
+        self.linear1 = nn.Linear(150*100, 200)
+        self.relu = nn.LeakyReLU()
+        self.linear2 = nn.Linear(200, 9)
 
-  def forward(self, states):
-    x = states.view(states.shape[0], 150*100)
-    x = self.linear1(x)
-    x = self.relu(x)
-    x = self.linear2(x)
-    x = x.view(-1, 3, 3)
-    return x
+    def forward(self, states):
+        x = states.view(states.shape[0], 150*100)
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+        x = x.view(-1, 3, 3)
+        return x
 
 class ConvNet(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.conv1 = nn.Conv2d(1, 5, 5)
-    self.relu1 = nn.LeakyReLU()
-    self.conv2 = nn.Conv2d(5, 3, 5, stride=2)
-    self.relu2 = nn.LeakyReLU()
-    self.conv3 = nn.Conv2d(3, 3, 5, stride=3)
-    self.relu3 = nn.LeakyReLU()
-    self.linear1 = nn.Linear(966, 100)
-    self.relu4 = nn.LeakyReLU()
-    self.linear2 = nn.Linear(100, 9)
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 5, 5)
+        self.relu1 = nn.LeakyReLU()
+        self.conv2 = nn.Conv2d(5, 3, 5, stride=2)
+        self.relu2 = nn.LeakyReLU()
+        self.conv3 = nn.Conv2d(3, 3, 5, stride=3)
+        self.relu3 = nn.LeakyReLU()
+        self.linear1 = nn.Linear(966, 100)
+        self.relu4 = nn.LeakyReLU()
+        self.linear2 = nn.Linear(100, 9)
 
-  def forward(self, states):
-    x = self.conv1(states.unsqueeze(dim=1))
-    x = self.relu1(x)
-    x = self.conv2(x)
-    x = self.relu2(x)
-    x = self.conv3(x)
-    x = self.relu3(x)
-    x = x.view(x.shape[0], reduce(lambda a, b: a*b, x.shape[1:]))
-    x = self.linear1(x)
-    x = self.relu4(x)
-    x = self.linear2(x)
-    x = x.view(-1, 3, 3)
-    return x
+    def forward(self, states):
+        x = self.conv1(states.unsqueeze(dim=1))
+        x = self.relu1(x)
+        x = self.conv2(x)
+        x = self.relu2(x)
+        x = self.conv3(x)
+        x = self.relu3(x)
+        x = x.view(x.shape[0], reduce(lambda a, b: a*b, x.shape[1:]))
+        x = self.linear1(x)
+        x = self.relu4(x)
+        x = self.linear2(x)
+        x = x.view(-1, 3, 3)
+        return x
 
 examples = np.load("examples_100000.npy", allow_pickle=True)
 print("Found", len(examples), "examples.")
@@ -179,97 +179,97 @@ loss_func = nn.MSELoss()
 max_batch_size = 32
 
 def pn(x):
-  return (str(x) + (" " * 6))[0:6]
+    return (str(x) + (" " * 6))[0:6]
 
 import processed_plane_loader
 planeauthority = processed_plane_loader.load_environment('gridworld')
 
 for epoch in range(50):
-  random.shuffle(training)
-  avg_loss = 0
-  #n_correct = 0
-  avg_gradient_magnitude = 0
-  n_samples = 0
-  num_batches = math.ceil(len(training)/max_batch_size)
+    random.shuffle(training)
+    avg_loss = 0
+    #n_correct = 0
+    avg_gradient_magnitude = 0
+    n_samples = 0
+    num_batches = math.ceil(len(training)/max_batch_size)
 
-  for counter, batchno in enumerate(range(num_batches)):
-    batch_start = batchno * max_batch_size
-    batch_end = min(len(training), (batchno+1)*max_batch_size)
-    batch_size = batch_end - batch_start
-    batch = training[batch_start:batch_start+max_batch_size] # TODO replace with batch_end
-    assert(batch_size == len(batch))
-
-    optimizer.zero_grad()
-    data = F.one_hot(torch.Tensor([example["data"] for example in batch]).cuda().long(), num_classes=4).view(-1, 150, 100).float()
-    if method == 'gt':
-        label = torch.Tensor([label_from_example(example) for example in batch]).cuda() #(torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
-        prediction = net.forward(data)
-        loss = loss_func(prediction, label)
-    elif method == 'centroid':
-        prediction = net.forward(data)
-        #label = torch.Tensor([planeauthority.comparison_point(label_from_example(example)) for example in batch]).cuda() #(torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
-        label = torch.Tensor([planeauthority.comparison_point(x[0], label_from_example(x[1]), mode='centroid') for x in zip(prediction, batch)]).cuda()
-        loss = loss_func(prediction, label)
-    elif method == 'arp':
-        prediction = net.forward(data)
-        #label = torch.Tensor([planeauthority.comparison_point(label_from_example(example)) for example in batch]).cuda() #(torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
-        label = torch.Tensor([planeauthority.comparison_point(np.array(x[0].detach().cpu()), label_from_example(x[1]), mode='arp') for x in zip(prediction, batch)]).cuda()
-        loss = loss_func(prediction, label)
-
-    avg_loss += loss.item() * batch_size
-    #n_correct += (torch.argmax(prediction, dim=1) == label).sum().item()
-    n_samples += batch_size
-    loss.backward()
-    optimizer.step()
-    #print("train", example["data"].sum())
-    #for name, param in net.named_parameters():
-    #  if param.grad is not None:
-    #    avg_gradient_magnitude += torch.norm(param.grad)
-    #print("\ravg grad mag", avg_gradient_magnitude/counter, end="")
-
-    # UNCOMMENT TO PRINT INTERMEDIATES
-    if counter > 0:
-      print("\r", n_samples, "/", len(training), "- epoch", epoch, "- avg loss", pn(avg_loss/n_samples), end="")
-
-  avg_loss /= len(training)
-  #n_correct /= (3 * len(training))
-
-  # UNCOMMENT TO SAVE MODEL
-  torch.save(net.state_dict(), "model_transformer_regression_lastminute_gridworld_centroid_" + method + ".parameters")
-
-  avg_training_loss = avg_loss
-  #n_correct_training = n_correct
-  max_strlen = 0
-  avg_loss = 0
-  #n_correct = 0
-  n_samples = 0
-  with torch.no_grad():
-    num_batches = math.ceil(len(validation)/max_batch_size)
     for counter, batchno in enumerate(range(num_batches)):
-      batch_start = batchno * max_batch_size
-      batch_end = min(len(validation), (batchno+1)*max_batch_size)
-      batch_size = batch_end - batch_start
-      batch = validation[batch_start:batch_start+max_batch_size] # TODO replace with batch_end
-      assert(batch_size == len(batch))
+        batch_start = batchno * max_batch_size
+        batch_end = min(len(training), (batchno+1)*max_batch_size)
+        batch_size = batch_end - batch_start
+        batch = training[batch_start:batch_start+max_batch_size] # TODO replace with batch_end
+        assert(batch_size == len(batch))
 
-      #print("valid", example["data"].sum())
-      data = F.one_hot(torch.Tensor([example["data"] for example in batch]).cuda().long(), num_classes=4).view(-1, 150, 100).float()
-      label = (torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
-      prediction = net.forward(data)
-      loss = loss_func(prediction, label)
-      avg_loss += loss.item() * batch_size
-      #n_correct += (torch.argmax(prediction, dim=1) == label).sum().item()
-      n_samples += batch_size
+        optimizer.zero_grad()
+        data = F.one_hot(torch.Tensor([example["data"] for example in batch]).cuda().long(), num_classes=4).view(-1, 150, 100).float()
+        if method == 'gt':
+            label = torch.Tensor([label_from_example(example) for example in batch]).cuda() #(torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
+            prediction = net.forward(data)
+            loss = loss_func(prediction, label)
+        elif method == 'centroid':
+            prediction = net.forward(data)
+            #label = torch.Tensor([planeauthority.comparison_point(label_from_example(example)) for example in batch]).cuda() #(torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
+            label = torch.Tensor([planeauthority.comparison_point(x[0], label_from_example(x[1]), mode='centroid') for x in zip(prediction, batch)]).cuda()
+            loss = loss_func(prediction, label)
+        elif method == 'arp':
+            prediction = net.forward(data)
+            #label = torch.Tensor([planeauthority.comparison_point(label_from_example(example)) for example in batch]).cuda() #(torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
+            label = torch.Tensor([planeauthority.comparison_point(np.array(x[0].detach().cpu()), label_from_example(x[1]), mode='arp') for x in zip(prediction, batch)]).cuda()
+            loss = loss_func(prediction, label)
 
-      if counter > 0:
-        string_to_print = " ".join([str(x) for x in ["\rValid", n_samples, "/", len(validation), "- epoch", epoch, "- avg loss", pn(avg_training_loss), "- val loss", pn(avg_loss/n_samples)]])
-        if len(string_to_print) > max_strlen:
-          max_strlen = len(string_to_print)
-        print(string_to_print, end="")
-    avg_loss /= len(validation)
-    #n_correct /= (3 * len(validation))
-    string_to_print = " ".join([str(x) for x in ["\rFinished epoch", epoch, "- avg loss", pn(avg_training_loss), "- val loss", pn(avg_loss)]])
-    print(string_to_print + (" " * (max_strlen - len(string_to_print))))
+        avg_loss += loss.item() * batch_size
+        #n_correct += (torch.argmax(prediction, dim=1) == label).sum().item()
+        n_samples += batch_size
+        loss.backward()
+        optimizer.step()
+        #print("train", example["data"].sum())
+        #for name, param in net.named_parameters():
+        #  if param.grad is not None:
+        #    avg_gradient_magnitude += torch.norm(param.grad)
+        #print("\ravg grad mag", avg_gradient_magnitude/counter, end="")
+
+        # UNCOMMENT TO PRINT INTERMEDIATES
+        if counter > 0:
+            print("\r", n_samples, "/", len(training), "- epoch", epoch, "- avg loss", pn(avg_loss/n_samples), end="")
+
+    avg_loss /= len(training)
+    #n_correct /= (3 * len(training))
+
+    # UNCOMMENT TO SAVE MODEL
+    torch.save(net.state_dict(), "model_transformer_regression_lastminute_gridworld_centroid_" + method + ".parameters")
+
+    avg_training_loss = avg_loss
+    #n_correct_training = n_correct
+    max_strlen = 0
+    avg_loss = 0
+    #n_correct = 0
+    n_samples = 0
+    with torch.no_grad():
+        num_batches = math.ceil(len(validation)/max_batch_size)
+        for counter, batchno in enumerate(range(num_batches)):
+            batch_start = batchno * max_batch_size
+            batch_end = min(len(validation), (batchno+1)*max_batch_size)
+            batch_size = batch_end - batch_start
+            batch = validation[batch_start:batch_start+max_batch_size] # TODO replace with batch_end
+            assert(batch_size == len(batch))
+
+            #print("valid", example["data"].sum())
+            data = F.one_hot(torch.Tensor([example["data"] for example in batch]).cuda().long(), num_classes=4).view(-1, 150, 100).float()
+            label = (torch.Tensor([example["rgb_decode"][1:] for example in batch]).cuda().long())
+            prediction = net.forward(data)
+            loss = loss_func(prediction, label)
+            avg_loss += loss.item() * batch_size
+            #n_correct += (torch.argmax(prediction, dim=1) == label).sum().item()
+            n_samples += batch_size
+
+            if counter > 0:
+                string_to_print = " ".join([str(x) for x in ["\rValid", n_samples, "/", len(validation), "- epoch", epoch, "- avg loss", pn(avg_training_loss), "- val loss", pn(avg_loss/n_samples)]])
+                if len(string_to_print) > max_strlen:
+                    max_strlen = len(string_to_print)
+                print(string_to_print, end="")
+        avg_loss /= len(validation)
+        #n_correct /= (3 * len(validation))
+        string_to_print = " ".join([str(x) for x in ["\rFinished epoch", epoch, "- avg loss", pn(avg_training_loss), "- val loss", pn(avg_loss)]])
+        print(string_to_print + (" " * (max_strlen - len(string_to_print))))
 
 """
 for epoch in range(50):

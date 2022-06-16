@@ -95,7 +95,7 @@ class NewBlockEnv(gym.Env):
         self.rgb_decode[0] = BlockType.EMPTY
         for i in np.arange(self.color_permutations.size):
             self.rgb_decode[1+self.color_permutations[i]] = self.block_roles[i]
-            
+
 
     def _next_observation(self):
         res = np.zeros((viewport_width, viewport_width), dtype=np.int64)
@@ -127,7 +127,7 @@ class NewBlockEnv(gym.Env):
                 if manhattan_dist == 0:
                     # We are sitting on a block, eat it
                     self.eat(self.x, self.y)
-                
+
                 if obs[ix, iy] == BlockType.POSITIVE:
                     reward += multiplier
                 elif obs[ix, iy] == BlockType.NEGATIVE:
@@ -145,7 +145,7 @@ class NewBlockEnv(gym.Env):
                 if manhattan_dist == 0:
                     # We are sitting on a block, eat it
                     self.eat(self.x, self.y)
-                
+
                 if obs[ix, iy] == BlockType.POSITIVE:
                     reward += multiplier
                 elif obs[ix, iy] == BlockType.NEGATIVE:
@@ -169,7 +169,7 @@ class NewBlockEnv(gym.Env):
         done = self.nsteps > 150
 
         obs = self._next_observation()
-        
+
         reward = self._get_reward()
 
         if action != Action.NOOP:
@@ -187,4 +187,3 @@ class NewBlockEnv(gym.Env):
             return self._next_render()
         else:
             return self._next_observation()
-

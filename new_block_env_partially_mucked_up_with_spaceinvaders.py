@@ -106,7 +106,7 @@ class SpaceInvadersBlockEnv(gym.Env):
         self.bullets = [] # each bullet is tuple of (y, x, marked_for_deletion_due_to_hitting_target)
         for i in np.arange(self.color_permutations.size):
             self.rgb_decode[3+self.color_permutations[i]] = self.block_roles[i]
-            
+
 
     def _next_observation(self):
         assert(1 not in self.ships)
@@ -114,19 +114,19 @@ class SpaceInvadersBlockEnv(gym.Env):
         res = np.zeros((viewport_width, viewport_width), dtype=np.int64)
         i = 0
         for y in range(viewport_width-1):
-          for x in range(viewport_width):
-            res[y, x] = self.rgb_decode[self.ships[i]]
-            if res[y, x] == BlockType.PLAYER:
-              raise RuntimeError("uh oh")
-            i += 1
+            for x in range(viewport_width):
+                res[y, x] = self.rgb_decode[self.ships[i]]
+                if res[y, x] == BlockType.PLAYER:
+                    raise RuntimeError("uh oh")
+                i += 1
         for x in range(viewport_width):
-          if x == self.position:
-            res[y, x] = BlockType.PLAYER
-          else:
-            res[y, x] = BlockType.EMPTY
+            if x == self.position:
+                res[y, x] = BlockType.PLAYER
+            else:
+                res[y, x] = BlockType.EMPTY
         for bullet in self.bullets:
-          y, x, _ = bullet
-          res[y, x] = BlockType.BULLET
+            y, x, _ = bullet
+            res[y, x] = BlockType.BULLET
         return res
 
     # Note to self:
@@ -140,17 +140,17 @@ class SpaceInvadersBlockEnv(gym.Env):
         res = np.zeros((viewport_width, viewport_width), dtype=np.int64)
         i = 0
         for y in range(viewport_width-1):
-          for x in range(viewport_width):
-            res[y, x] = self.ships[i]
-            i += 1
+            for x in range(viewport_width):
+                res[y, x] = self.ships[i]
+                i += 1
         for x in range(viewport_width):
-          if x == self.position:
-            res[y, x] = 1 # ship
-          else:
-            res[y, x] = 0 # empty
+            if x == self.position:
+                res[y, x] = 1 # ship
+            else:
+                res[y, x] = 0 # empty
         for bullet in self.bullets:
-          y, x, _ = bullet
-          res[y, x] = 2 # bullet
+            y, x, _ = bullet
+            res[y, x] = 2 # bullet
         return res
 
     # NOTE: This function was usurped by _take_action, ignore below note
@@ -168,7 +168,7 @@ class SpaceInvadersBlockEnv(gym.Env):
                 if manhattan_dist == 0:
                     # We are sitting on a block, eat it
                     self.eat(self.x, self.y)
-                
+
                 if obs[ix, iy] == BlockType.POSITIVE:
                     reward += multiplier
                 elif obs[ix, iy] == BlockType.NEGATIVE:
@@ -251,7 +251,7 @@ class SpaceInvadersBlockEnv(gym.Env):
         done = self.nsteps > 150
 
         obs = self._next_observation()
-        
+
         #reward = self._get_reward()
 
         if action != Action.NOOP:
@@ -269,4 +269,3 @@ class SpaceInvadersBlockEnv(gym.Env):
             return self._next_render()
         else:
             return self._next_observation()
-

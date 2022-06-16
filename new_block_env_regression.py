@@ -81,12 +81,12 @@ class NewBlockEnv(gym.Env):
         assert(len(block_roles) == len(block_power))
         block_power_sum = 0
         for i in range(num_blocks):
-          if block_roles[i] == BlockType.NEUTRAL:
-            assert(block_power[i] == 0)
-          block_power_sum += block_power[i] ** 2
+            if block_roles[i] == BlockType.NEUTRAL:
+                assert(block_power[i] == 0)
+            block_power_sum += block_power[i] ** 2
         block_power_norm = math.sqrt(block_power_sum)
         if block_power_norm != 0:
-          block_power = [x/block_power_norm for x in block_power]
+            block_power = [x/block_power_norm for x in block_power]
 
         self.block_roles = block_roles
         self.block_power = block_power
@@ -106,7 +106,7 @@ class NewBlockEnv(gym.Env):
         self.rgb_decode[0] = BlockType.EMPTY
         for i in np.arange(self.color_permutations.size):
             self.rgb_decode[1+self.color_permutations[i]] = self.block_roles[i]
-            
+
 
     def _next_observation(self):
         res = np.zeros((viewport_width, viewport_width), dtype=np.int64)
@@ -140,7 +140,7 @@ class NewBlockEnv(gym.Env):
                 if manhattan_dist == 0:
                     # We are sitting on a block, eat it
                     self.eat(self.x, self.y)
-                
+
                 if obs[ix, iy] == BlockType.POSITIVE:
                     reward += self.block_power[rendered_block_type-1] * multiplier
                     alt_reward_val += alt_reward[rendered_block_type-1] * multiplier
@@ -168,7 +168,7 @@ class NewBlockEnv(gym.Env):
         done = self.nsteps > 150
 
         obs = self._next_observation()
-        
+
         reward, alt_reward_val = self._get_reward(alt_reward = alt_reward)
 
         if action != Action.NOOP:
@@ -186,4 +186,3 @@ class NewBlockEnv(gym.Env):
             return self._next_render()
         else:
             return self._next_observation()
-
