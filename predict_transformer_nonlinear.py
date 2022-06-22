@@ -10,6 +10,11 @@ from torch.utils.data import random_split, DataLoader
 import numpy as np
 import sys
 from tqdm import tqdm
+import wandb
+
+NUM_TRAJ_PER_REWARD = 10000
+transformer_dimensions = 100
+rng = np.random.default_rng()
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train supervised IRL models')
@@ -27,12 +32,11 @@ def parse_args():
     parser.add_argument('--evaluate', '-e', action='store_true', help='run for one epoch without updating')
     parser.add_argument('--saved-model', '-sm', type=str, default=None, help='location of saved model to load')
     parser.add_argument('--verbose', '-v', action='store_true')
+    parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
     return args
-
-transformer_dimensions = 100
 
 class PositionalEncoder(nn.Module):
     def __init__(self, d_model, max_seq_len=151):
@@ -131,9 +135,7 @@ class NonLinearNet(nn.Module):
         return reward
     
 class NonlinearDataset(torch.utils.data.Dataset):
-    def __init__(self, state_file, reward_file):
-        states = np.load(state_file, allow_pickle=True)
-        rewards = np.load(reward_file, allow_pickle=True)
+    def __init__(self, states, rewards):
         self.states = torch.Tensor(states).to(torch.int64) #(n_examples, L, S); might need to be float
         self.rewards = torch.Tensor(rewards).to(torch.float) #(n_examples, L)
         self.states = F.one_hot(self.states, num_classes=4).view(-1, 150, 100)
@@ -143,9 +145,46 @@ class NonlinearDataset(torch.utils.data.Dataset):
     
     def __getitem__(self, index):
         return self.states[index].cuda().to(torch.float), self.rewards[index].cuda() # returns a whole (L, S), (L, 1) trajectory
+    
+def get_splits(args):
+    state_file = f"states_{args.num_examples}.npy"
+    reward_file = f"rewards_{args.num_examples}.npy"
+    states = np.load(state_file, allow_pickle=True)
+    rewards = np.load(reward_file, allow_pickle=True)
+    assert args.num_examples % NUM_TRAJ_PER_REWARD == 0
+    num_rewards = args.num_examples // NUM_TRAJ_PER_REWARD
+    train_length = int(num_rewards*0.8)
+    val_length = num_rewards - train_length
+    reward_idx_list = np.arange(num_rewards)
+    rng.shuffle(reward_idx_list)
+    states_by_reward = np.reshape(states, (num_rewards, -1, states.shape[-2], states.shape[-1]))
+    rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))
+    train_idxs = reward_idx_list[:train_length]
+    val_idxs = reward_idx_list[train_length:]
+    train_states = states_by_reward[train_idxs]
+    train_rewards = rewards_by_reward[train_idxs]
+    train_states_flattened = np.reshape(train_states, (-1, train_states.shape[-2], train_states.shape[-1]))
+    train_rewards_flattened = np.reshape(train_rewards, (-1, train_rewards.shape[-1]))
+    val_states = states_by_reward[val_idxs]
+    val_rewards = rewards_by_reward[val_idxs]
+    val_states_flattened = np.reshape(val_states, (-1, val_states.shape[-2], val_states.shape[-1]))
+    val_rewards_flattened = np.reshape(val_rewards, (-1, val_rewards.shape[-1]))
+    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened)
+    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened)
+    
+    # training_data, validation_data = random_split(dataset, [train_length, val_length])
+    # print("Num training", len(training_data))
+    # print("Num validation", len(validation_data))
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    validation_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
+    return train_dataloader, validation_dataloader
 
 def train(args):
-    dataset = NonlinearDataset(f"states_{args.num_examples}.npy", f"rewards_{args.num_examples}.npy")
+    wandb.init(project='sirl')
+    wandb.config.update(args)
+    
+    train_dataloader, validation_dataloader = get_splits(args)
+    
     freest_gpu = get_freest_gpu()
     torch.cuda.set_device(f'cuda:{freest_gpu}')
 
@@ -154,23 +193,12 @@ def train(args):
         net.load_state_dict(torch.load(args.saved_model))
 
     optimizer = torch.optim.Adam(net.parameters()) if not args.evaluate else None
-    
-    train_length = int(len(dataset)*0.8)
-    val_length = len(dataset) - train_length
-    training_data, validation_data = random_split(dataset, [train_length, val_length])
-    print("Num training", len(training_data))
-    print("Num validation", len(validation_data))
     loss_func = nn.MSELoss()
-
-    train_dataloader = DataLoader(training_data, batch_size=args.batch_size, shuffle=True)
-    validation_dataloader = DataLoader(validation_data, batch_size=args.batch_size, shuffle=True)
 
     # TQDM inspiration from https://towardsdatascience.com/training-models-with-a-progress-a-bar-2b664de3e13e
     for epoch in range(args.num_epochs):
 
         avg_loss = 0
-        #n_correct = 0
-        avg_gradient_magnitude = 0
         n_samples = 0
         with tqdm(train_dataloader, unit="batch") as tepoch:
             for states_batch, rewards_batch in tepoch:
@@ -186,6 +214,7 @@ def train(args):
                     optimizer.zero_grad()
                 prediction = net.forward(trajectory_batch, states_batch)
                 loss = loss_func(prediction, rewards_batch)
+                wandb.log({'train loss': loss})
                 # loss.backward()
                 if args.verbose and tepoch.n % 100 == 0:
                     print(prediction)
@@ -206,15 +235,17 @@ def train(args):
                     optimizer.step()
                 tepoch.set_postfix({"avg loss": avg_loss/n_samples})
 
-        avg_loss /= len(train_dataloader)
+        avg_loss /= len(train_dataloader)*150*args.batch_size
         #n_correct /= (3 * len(training))
 
         # UNCOMMENT TO SAVE MODEL
         if args.save_model and not args.evaluate:
-            torch.save(net.state_dict(), "nonlinear_model.parameters")
+            torch.save(net.state_dict(), args.save_to)
 
         avg_training_loss = avg_loss
-        print("Average training loss: {avg_training_loss}")
+        print(f"Average training loss: {avg_training_loss}")
+        wandb.log({'average train loss': avg_training_loss})
+        avg_loss = 0
         n_samples = 0
         with torch.no_grad():
             with tqdm(validation_dataloader, unit="batch") as tepoch:
@@ -229,11 +260,13 @@ def train(args):
                     rewards_batch = rewards_batch.view(-1) # bsize * L
                     prediction = net.forward(trajectory_batch, states_batch)
                     loss = loss_func(prediction, rewards_batch)
-                    avg_loss += loss.item() * args.batch_size
+                    avg_loss += loss.item() * args.batch_size * 150
                     n_samples += args.batch_size
                     tepoch.set_postfix({"avg validation loss": avg_loss/n_samples})
+        avg_loss /= len(validation_dataloader)*150*args.batch_size
+        wandb.log({'average validation loss': avg_loss})
     if not args.evaluate:
-        torch.save(net.state_dict(), "nonlinear_model.parameters")
+        torch.save(net.state_dict(), args.save_to)
 
 if __name__ == "__main__":
     args = parse_args()
