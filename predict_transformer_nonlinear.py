@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument('--saved-model', '-sm', type=str, default=None, help='location of saved model to load')
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
+    parser.add_argument('--permute-types', '-pt', action='store_true')
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
@@ -159,6 +160,11 @@ def get_splits(args):
     rng.shuffle(reward_idx_list)
     states_by_reward = np.reshape(states, (num_rewards, -1, states.shape[-2], states.shape[-1]))
     rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))
+    if args.permute_types:
+        for i in num_rewards:
+            permutation = np.arange(4)
+            rng.shuffle(permutation)
+            states_by_reward[i] = permutation[states_by_reward[i]]
     train_idxs = reward_idx_list[:train_length]
     val_idxs = reward_idx_list[train_length:]
     train_states = states_by_reward[train_idxs]
