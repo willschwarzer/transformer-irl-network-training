@@ -13,7 +13,6 @@ from tqdm import tqdm
 import wandb
 
 NUM_TRAJ_PER_REWARD = 10000
-transformer_dimensions = 100
 rng = np.random.default_rng()
 
 def parse_args():
@@ -35,6 +34,7 @@ def parse_args():
     parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
     parser.add_argument('--permute-types', '-pt', action='store_true')
     parser.add_argument('--no-trajectory-sigmoid', '-nts', action='store_true')
+    parser.add_argument('--space-invaders', '-si', default=True, action=argparse.BooleanOptionalAction)
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
@@ -62,16 +62,44 @@ class PositionalEncoder(nn.Module):
             x = x + pe
             return x
 
+class OtherPositionalEncoder(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(OtherPositionalEncoder, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        r"""Inputs of forward function
+        Args:
+            x: the sequence fed to the positional encoder model (required).
+        Shape:
+            x: [sequence length, batch size, embed dim]
+            output: [sequence length, batch size, embed dim]
+        Examples:
+            >>> output = pos_encoder(x)
+        """
+
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)        
+
+
 # Try replacing with LSTM
 # Check trajectories (certainly don't have enough cap. to memorize illogical differences in dumb Hs)
 # To that end, should also run on space invaders
 class TrajectoryNet(nn.Module):
-    def __init__(self, sigmoid=True):
+    def __init__(self, num_classes, sigmoid=True):
         super().__init__()
-        self.positional_encoder = PositionalEncoder(transformer_dimensions)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dimensions, nhead=10, batch_first=True)
+        self.positional_encoder = OtherPositionalEncoder(25*num_classes)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=25*num_classes, nhead=10, batch_first=True)
         self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
-        self.linear1 = nn.Linear(100, 50)
+        self.linear1 = nn.Linear(25*num_classes, 50)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(50, 3)
         self.sigmoid = nn.Sigmoid() if sigmoid else nn.Identity()
@@ -80,13 +108,58 @@ class TrajectoryNet(nn.Module):
         x = self.positional_encoder(states)
         x = self.transformer(x)
         assert(x.shape[1] == 150)
-        assert(x.shape[2] == 100)
+        assert(x.shape[2] == 25*num_classes)
         x = torch.mean(x, dim=1)
         x = self.linear1(x)
         x = self.relu(x)
         x = self.linear2(x)
         #x = x.view(-1, 3)
         x = self.sigmoid(x)
+        return x
+    
+class SIPositionalEncoder(nn.Module):
+    def __init__(self, d_model, max_seq_len=151):
+        super().__init__()
+        self.d_model = d_model
+        pe = torch.zeros(max_seq_len, d_model)
+        for pos in range(max_seq_len):
+            for i in range(0, d_model, 2):
+                pe[pos, i] = \
+                  math.sin(pos / (10000 ** ((2 * i) / d_model)))
+                pe[pos, i + 1] = \
+                  math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        with torch.no_grad():
+            x = x * math.sqrt(self.d_model)
+            seq_len = x.size(1)
+            pe = self.pe[:, :seq_len]
+            x = x + pe
+            return x
+
+class SITrajectoryNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.positional_encoder = SIPositionalEncoder(150)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=150, nhead=10, batch_first=True)
+        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
+        self.linear1 = nn.Linear(150, 50)
+        self.relu = nn.LeakyReLU()
+        self.linear2 = nn.Linear(50, 3)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, states):
+        x = self.positional_encoder(states)
+        x = self.transformer(x)
+        assert(x.shape[1] == 150)
+        assert(x.shape[2] == 150)
+        x = torch.mean(x, dim=1)
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.linear2(x)
+        #x = x.view(-1, 3)
         return x
     
 class RewardNet(nn.Module):
@@ -105,9 +178,9 @@ class RewardNet(nn.Module):
         return x.squeeze()
     
 class StateNet(nn.Module):
-    def __init__(self, state_rep_dim, hidden_size):
+    def __init__(self, state_rep_dim, hidden_size, num_classes):
         super().__init__()
-        self.linear1 = nn.Linear(100, hidden_size)
+        self.linear1 = nn.Linear(25*num_classes, hidden_size)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(hidden_size, state_rep_dim)
     
@@ -118,11 +191,12 @@ class StateNet(nn.Module):
         return x
     
 class NonLinearNet(nn.Module):
-    def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, mlp=False, trajectory_sigmoid=True):
+    def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, num_classes, mlp=False, trajectory_sigmoid=True):
         super().__init__()
         assert trajectory_rep_dim == state_rep_dim == 3, "Variable rep dims not yet implemented!"
-        self.trajectory_encoder = TrajectoryNet(trajectory_sigmoid)
-        self.state_encoder = StateNet(state_rep_dim, state_hidden_size)
+        # self.trajectory_encoder = TrajectoryNet(trajectory_sigmoid, num_classes)
+        self.trajectory_encoder = SITrajectoryNet()
+        self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_classes)
         self.mlp = mlp
         if mlp:
             self.reward_layer = RewardNet(trajectory_rep_dim, state_rep_dim, reward_hidden_size)
@@ -140,10 +214,10 @@ class NonLinearNet(nn.Module):
         return reward
     
 class NonlinearDataset(torch.utils.data.Dataset):
-    def __init__(self, states, rewards):
+    def __init__(self, states, rewards, num_classes=4):
         self.states = torch.Tensor(states).to(torch.int64) #(n_examples, L, S); might need to be float
         self.rewards = torch.Tensor(rewards).to(torch.float) #(n_examples, L)
-        self.states = F.one_hot(self.states, num_classes=4).view(-1, 150, 100)
+        self.states = F.one_hot(self.states, num_classes=num_classes).view(-1, 150, 25*num_classes)
         
     def __len__(self):
         return len(self.states)
@@ -152,8 +226,8 @@ class NonlinearDataset(torch.utils.data.Dataset):
         return self.states[index].cuda().to(torch.float), self.rewards[index].cuda() # returns a whole (L, S), (L, 1) trajectory
     
 def get_splits(args):
-    state_file = f"states_{args.num_examples}.npy"
-    reward_file = f"rewards_{args.num_examples}.npy"
+    state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
+    reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
     states = np.load(state_file, allow_pickle=True)
     rewards = np.load(reward_file, allow_pickle=True)
     assert args.num_examples % NUM_TRAJ_PER_REWARD == 0
@@ -166,9 +240,10 @@ def get_splits(args):
     rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))
     if args.permute_types:
         for i in range(num_rewards):
-            permutation = np.arange(4)
+            permutation = np.arange(3, 6) if args.space_invaders else np.arange(4)
             rng.shuffle(permutation)
-            states_by_reward[i] = permutation[states_by_reward[i]]
+            permutations_plus = np.concatenate((np.arange(3), permutation)) if args.space_invaders else permutation
+            states_by_reward[i] = permutations_plus[states_by_reward[i]]
     train_idxs = reward_idx_list[:train_length]
     val_idxs = reward_idx_list[train_length:]
     train_states = states_by_reward[train_idxs]
@@ -179,8 +254,8 @@ def get_splits(args):
     val_rewards = rewards_by_reward[val_idxs]
     val_states_flattened = np.reshape(val_states, (-1, val_states.shape[-2], val_states.shape[-1]))
     val_rewards_flattened = np.reshape(val_rewards, (-1, val_rewards.shape[-1]))
-    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened)
-    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened)
+    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened, 6 if args.space_invaders else 4)
+    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, 6 if args.space_invaders else 4)
     
     # training_data, validation_data = random_split(dataset, [train_length, val_length])
     # print("Num training", len(training_data))
@@ -198,13 +273,15 @@ def train(args):
     freest_gpu = get_freest_gpu()
     torch.cuda.set_device(f'cuda:{freest_gpu}')
 
-    net = NonLinearNet(3, 3, 64, 64, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid).cuda()
+    num_classes = 6 if args.space_invaders else 4
+
+    net = NonLinearNet(3, 3, 64, 64, num_classes, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
 
     optimizer = torch.optim.Adam(net.parameters()) if not args.evaluate else None
     loss_func = nn.MSELoss()
-
+    
     # TQDM inspiration from https://towardsdatascience.com/training-models-with-a-progress-a-bar-2b664de3e13e
     for epoch in range(args.num_epochs):
 
@@ -216,9 +293,9 @@ def train(args):
                 # rewards_batch: (bsize, 150)
                 tepoch.set_description(f"Epoch {epoch}")
                 # In effect, we now batch by batch *and* t
-                trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 100) #repeat trajectory 150 times
-                trajectory_batch = trajectory_batch.reshape(-1, 150, 100) # return to batch form: (bsize*L, L, 100)
-                states_batch = states_batch.view(-1, 100) # (bsize*L, 100)
+                trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
+                trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
+                states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
                 rewards_batch = rewards_batch.view(-1) # bsize * L
                 if not args.evaluate:
                     optimizer.zero_grad()
@@ -265,9 +342,9 @@ def train(args):
                     # rewards_batch: (bsize, 150)
                     tepoch.set_description("Epoch {epoch} (validation)")
                     # In effect, we now batch by batch *and* t
-                    trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 100) #repeat trajectory 150 times
-                    trajectory_batch = trajectory_batch.reshape(-1, 150, 100) # return to batch form: (bsize*L, L, 100)
-                    states_batch = states_batch.view(-1, 100) # (bsize*L, 100)
+                    trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
+                    trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
+                    states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
                     rewards_batch = rewards_batch.view(-1) # bsize * L
                     prediction = net.forward(trajectory_batch, states_batch)
                     loss = loss_func(prediction, rewards_batch)
