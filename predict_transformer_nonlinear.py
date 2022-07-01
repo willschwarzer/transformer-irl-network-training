@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
     parser.add_argument('--permute-types', '-pt', action='store_true')
+    parser.add_argument('--no-trajectory-sigmoid', '-nts', action='store_true')
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
@@ -61,8 +62,11 @@ class PositionalEncoder(nn.Module):
             x = x + pe
             return x
 
+# Try replacing with LSTM
+# Check trajectories (certainly don't have enough cap. to memorize illogical differences in dumb Hs)
+# To that end, should also run on space invaders
 class TrajectoryNet(nn.Module):
-    def __init__(self):
+    def __init__(self, sigmoid=True):
         super().__init__()
         self.positional_encoder = PositionalEncoder(transformer_dimensions)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=transformer_dimensions, nhead=10, batch_first=True)
@@ -70,7 +74,7 @@ class TrajectoryNet(nn.Module):
         self.linear1 = nn.Linear(100, 50)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(50, 3)
-        self.sigmoid = nn.Sigmoid()
+        self.sigmoid = nn.Sigmoid() if sigmoid else nn.Identity()
 
     def forward(self, states):
         x = self.positional_encoder(states)
@@ -114,10 +118,10 @@ class StateNet(nn.Module):
         return x
     
 class NonLinearNet(nn.Module):
-    def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, mlp=False):
+    def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, mlp=False, trajectory_sigmoid=True):
         super().__init__()
         assert trajectory_rep_dim == state_rep_dim == 3, "Variable rep dims not yet implemented!"
-        self.trajectory_encoder = TrajectoryNet()
+        self.trajectory_encoder = TrajectoryNet(trajectory_sigmoid)
         self.state_encoder = StateNet(state_rep_dim, state_hidden_size)
         self.mlp = mlp
         if mlp:
@@ -161,7 +165,7 @@ def get_splits(args):
     states_by_reward = np.reshape(states, (num_rewards, -1, states.shape[-2], states.shape[-1]))
     rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))
     if args.permute_types:
-        for i in num_rewards:
+        for i in range(num_rewards):
             permutation = np.arange(4)
             rng.shuffle(permutation)
             states_by_reward[i] = permutation[states_by_reward[i]]
@@ -194,7 +198,7 @@ def train(args):
     freest_gpu = get_freest_gpu()
     torch.cuda.set_device(f'cuda:{freest_gpu}')
 
-    net = NonLinearNet(3, 3, 64, 64, mlp=args.mlp).cuda()
+    net = NonLinearNet(3, 3, 64, 64, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
 
@@ -228,6 +232,7 @@ def train(args):
                     print(torch.max((prediction-rewards_batch)**2))
                     worst = torch.argmax((prediction-rewards_batch)**2)
                     print(prediction[worst], rewards_batch[worst])
+                    print(net.trajectory_encoder(trajectory_batch[0:(args.batch_size+1)*150:150]))
                     # for name, param in net.named_parameters():
                     #     if param.grad is not None:
                     #         grad = torch.max(param.grad)
