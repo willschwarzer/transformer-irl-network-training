@@ -62,32 +62,32 @@ class PositionalEncoder(nn.Module):
             x = x + pe
             return x
 
-class OtherPositionalEncoder(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(OtherPositionalEncoder, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
+# class OtherPositionalEncoder(nn.Module):
+#     def __init__(self, d_model, dropout=0.1, max_len=5000):
+#         super(OtherPositionalEncoder, self).__init__()
+#         self.dropout = nn.Dropout(p=dropout)
 
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
+#         pe = torch.zeros(max_len, d_model)
+#         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+#         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+#         pe[:, 0::2] = torch.sin(position * div_term)
+#         pe[:, 1::2] = torch.cos(position * div_term)
+#         pe = pe.unsqueeze(0).transpose(0, 1)
+#         self.register_buffer('pe', pe)
 
-    def forward(self, x):
-        r"""Inputs of forward function
-        Args:
-            x: the sequence fed to the positional encoder model (required).
-        Shape:
-            x: [sequence length, batch size, embed dim]
-            output: [sequence length, batch size, embed dim]
-        Examples:
-            >>> output = pos_encoder(x)
-        """
+#     def forward(self, x):
+#         r"""Inputs of forward function
+#         Args:
+#             x: the sequence fed to the positional encoder model (required).
+#         Shape:
+#             x: [sequence length, batch size, embed dim]
+#             output: [sequence length, batch size, embed dim]
+#         Examples:
+#             >>> output = pos_encoder(x)
+#         """
 
-        x = x + self.pe[:x.size(0), :]
-        return self.dropout(x)        
+#         x = x + self.pe[:x.size(0), :]
+#         return self.dropout(x)        
 
 
 # Try replacing with LSTM
@@ -96,19 +96,20 @@ class OtherPositionalEncoder(nn.Module):
 class TrajectoryNet(nn.Module):
     def __init__(self, num_classes, sigmoid=True):
         super().__init__()
-        self.positional_encoder = OtherPositionalEncoder(25*num_classes)
+        self.positional_encoder = PositionalEncoder(25*num_classes)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=25*num_classes, nhead=10, batch_first=True)
         self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
         self.linear1 = nn.Linear(25*num_classes, 50)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(50, 3)
         self.sigmoid = nn.Sigmoid() if sigmoid else nn.Identity()
+        self.num_classes = num_classes
 
     def forward(self, states):
         x = self.positional_encoder(states)
         x = self.transformer(x)
         assert(x.shape[1] == 150)
-        assert(x.shape[2] == 25*num_classes)
+        assert(x.shape[2] == 25*self.num_classes)
         x = torch.mean(x, dim=1)
         x = self.linear1(x)
         x = self.relu(x)
@@ -194,8 +195,8 @@ class NonLinearNet(nn.Module):
     def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, num_classes, mlp=False, trajectory_sigmoid=True):
         super().__init__()
         assert trajectory_rep_dim == state_rep_dim == 3, "Variable rep dims not yet implemented!"
-        # self.trajectory_encoder = TrajectoryNet(trajectory_sigmoid, num_classes)
-        self.trajectory_encoder = SITrajectoryNet()
+        self.trajectory_encoder = TrajectoryNet(num_classes, trajectory_sigmoid)
+        # self.trajectory_encoder = SITrajectoryNet()
         self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_classes)
         self.mlp = mlp
         if mlp:
@@ -226,8 +227,12 @@ class NonlinearDataset(torch.utils.data.Dataset):
         return self.states[index].cuda().to(torch.float), self.rewards[index].cuda() # returns a whole (L, S), (L, 1) trajectory
     
 def get_splits(args):
-    state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
-    reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
+    if args.space_invaders:
+        state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
+        reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
+    else:
+        state_file = f"states_{args.num_examples}.npy"
+        reward_file = f"rewards_{args.num_examples}.npy"
     states = np.load(state_file, allow_pickle=True)
     rewards = np.load(reward_file, allow_pickle=True)
     assert args.num_examples % NUM_TRAJ_PER_REWARD == 0
@@ -240,9 +245,10 @@ def get_splits(args):
     rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))
     if args.permute_types:
         for i in range(num_rewards):
-            permutation = np.arange(3, 6) if args.space_invaders else np.arange(4)
+            permutation = np.arange(3, 6) if args.space_invaders else np.arange(3)
             rng.shuffle(permutation)
-            permutations_plus = np.concatenate((np.arange(3), permutation)) if args.space_invaders else permutation
+            base_classes = np.arange(3 if args.space_invaders else 1)
+            permutations_plus = np.concatenate((base_classes, permutation))
             states_by_reward[i] = permutations_plus[states_by_reward[i]]
     train_idxs = reward_idx_list[:train_length]
     val_idxs = reward_idx_list[train_length:]
