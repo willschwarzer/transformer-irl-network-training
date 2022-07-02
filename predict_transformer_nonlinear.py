@@ -35,6 +35,10 @@ def parse_args():
     parser.add_argument('--permute-types', '-pt', action='store_true')
     parser.add_argument('--no-trajectory-sigmoid', '-nts', action='store_true')
     parser.add_argument('--space-invaders', '-si', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--num-trajectory-layers', '-ntl', default=1, type=int)
+    parser.add_argument('--num-state-layers', '-nsl', default=1, type=int)
+    parser.add_argument('--state-hidden-size', '-shs', default=64, type=int)
+    parser.add_argument('--lstm', '-l', action='store_true')
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
@@ -93,12 +97,12 @@ class PositionalEncoder(nn.Module):
 # Try replacing with LSTM
 # Check trajectories (certainly don't have enough cap. to memorize illogical differences in dumb Hs)
 # To that end, should also run on space invaders
-class TrajectoryNet(nn.Module):
-    def __init__(self, num_classes, sigmoid=True):
+class TrajectoryNetTransformer(nn.Module):
+    def __init__(self, num_classes, num_transformer_layers, sigmoid=True):
         super().__init__()
         self.positional_encoder = PositionalEncoder(25*num_classes)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=25*num_classes, nhead=10, batch_first=True)
-        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
+        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=num_transformer_layers)
         self.linear1 = nn.Linear(25*num_classes, 50)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(50, 3)
@@ -118,49 +122,20 @@ class TrajectoryNet(nn.Module):
         x = self.sigmoid(x)
         return x
     
-class SIPositionalEncoder(nn.Module):
-    def __init__(self, d_model, max_seq_len=151):
+class TrajectoryNetLSTM(nn.Module):
+    def __init__(self, num_classes, num_lstm_layers):
         super().__init__()
-        self.d_model = d_model
-        pe = torch.zeros(max_seq_len, d_model)
-        for pos in range(max_seq_len):
-            for i in range(0, d_model, 2):
-                pe[pos, i] = \
-                  math.sin(pos / (10000 ** ((2 * i) / d_model)))
-                pe[pos, i + 1] = \
-                  math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        with torch.no_grad():
-            x = x * math.sqrt(self.d_model)
-            seq_len = x.size(1)
-            pe = self.pe[:, :seq_len]
-            x = x + pe
-            return x
-
-class SITrajectoryNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.positional_encoder = SIPositionalEncoder(150)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=150, nhead=10, batch_first=True)
-        self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=1)
-        self.linear1 = nn.Linear(150, 50)
+        self.lstm = nn.LSTM(25*num_classes, 2048, num_lstm_layers, batch_first=True)
+        self.linear1 = nn.Linear(2048, 16)
         self.relu = nn.LeakyReLU()
-        self.linear2 = nn.Linear(50, 3)
-        self.sigmoid = nn.Sigmoid()
-
+        self.linear2 = nn.Linear(16, 3)
+        
     def forward(self, states):
-        x = self.positional_encoder(states)
-        x = self.transformer(x)
-        assert(x.shape[1] == 150)
-        assert(x.shape[2] == 150)
-        x = torch.mean(x, dim=1)
+        x, _ = self.lstm(states)
+        x = x[:, -1, :]
         x = self.linear1(x)
         x = self.relu(x)
         x = self.linear2(x)
-        #x = x.view(-1, 3)
         return x
     
 class RewardNet(nn.Module):
@@ -179,25 +154,29 @@ class RewardNet(nn.Module):
         return x.squeeze()
     
 class StateNet(nn.Module):
-    def __init__(self, state_rep_dim, hidden_size, num_classes):
+    def __init__(self, state_rep_dim, hidden_size, num_layers, num_classes):
         super().__init__()
-        self.linear1 = nn.Linear(25*num_classes, hidden_size)
-        self.relu = nn.LeakyReLU()
-        self.linear2 = nn.Linear(hidden_size, state_rep_dim)
+        modules = []
+        modules.append(nn.Linear(25*num_classes, hidden_size))
+        for i in range(num_layers-1):
+            modules.append(nn.Linear(hidden_size, hidden_size))
+            modules.append(nn.LeakyReLU())
+        modules.append(nn.Linear(hidden_size, state_rep_dim))
+        self.net = nn.Sequential(modules)
     
     def forward(self, state):
-        x = self.linear1(state)
-        x = self.relu(x)
-        x = self.linear2(x)
-        return x
+        return self.net(state)
     
 class NonLinearNet(nn.Module):
-    def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, num_classes, mlp=False, trajectory_sigmoid=True):
+    def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, num_classes, num_trajectory_layers, num_state_layers, mlp=False, trajectory_sigmoid=False, lstm=False):
         super().__init__()
         assert trajectory_rep_dim == state_rep_dim == 3, "Variable rep dims not yet implemented!"
-        self.trajectory_encoder = TrajectoryNet(num_classes, trajectory_sigmoid)
+        if lstm:
+            self.trajectory_encoder = TrajectoryNetLSTM(num_classes, num_trajectory_layers)
+        else:
+            self.trajectory_encoder = TrajectoryNetTransformer(num_classes, num_trajectory_layers, trajectory_sigmoid)
         # self.trajectory_encoder = SITrajectoryNet()
-        self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_classes)
+        self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_state_layers, num_classes)
         self.mlp = mlp
         if mlp:
             self.reward_layer = RewardNet(trajectory_rep_dim, state_rep_dim, reward_hidden_size)
@@ -281,7 +260,7 @@ def train(args):
 
     num_classes = 6 if args.space_invaders else 4
 
-    net = NonLinearNet(3, 3, 64, 64, num_classes, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid).cuda()
+    net = NonLinearNet(3, 3, 64, 64, num_classes, args.num_trajectory_layers, args.num_state_layers, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid, lstm=args.lstm).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
 
