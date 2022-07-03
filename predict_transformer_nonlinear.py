@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument('--num-state-layers', '-nsl', default=1, type=int)
     parser.add_argument('--state-hidden-size', '-shs', default=64, type=int)
     parser.add_argument('--lstm', '-l', action='store_true')
+    parser.add_argument('--repeat-trajectory-calculations', '-rtc', default=True, action=argparse.BooleanOptionalAction)
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
@@ -162,13 +163,24 @@ class StateNet(nn.Module):
             modules.append(nn.Linear(hidden_size, hidden_size))
             modules.append(nn.LeakyReLU())
         modules.append(nn.Linear(hidden_size, state_rep_dim))
-        self.net = nn.Sequential(modules)
+        self.net = nn.Sequential(*modules)
     
     def forward(self, state):
         return self.net(state)
     
 class NonLinearNet(nn.Module):
-    def __init__(self, trajectory_rep_dim, state_rep_dim, state_hidden_size, reward_hidden_size, num_classes, num_trajectory_layers, num_state_layers, mlp=False, trajectory_sigmoid=False, lstm=False):
+    def __init__(self, trajectory_rep_dim, 
+                 state_rep_dim, 
+                 state_hidden_size, 
+                 reward_hidden_size, 
+                 num_classes, 
+                 num_trajectory_layers, 
+                 num_state_layers, 
+                 mlp=False, 
+                 trajectory_sigmoid=False, 
+                 lstm=False, 
+                 repeat_trajectory_calculations=False):
+        
         super().__init__()
         assert trajectory_rep_dim == state_rep_dim == 3, "Variable rep dims not yet implemented!"
         if lstm:
@@ -178,12 +190,16 @@ class NonLinearNet(nn.Module):
         # self.trajectory_encoder = SITrajectoryNet()
         self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_state_layers, num_classes)
         self.mlp = mlp
+        if repeat_trajectory_calculations:
+            self.forward = self.forward_repeat
+        else:
+            self.forward = self.forward_no_repeat
         if mlp:
             self.reward_layer = RewardNet(trajectory_rep_dim, state_rep_dim, reward_hidden_size)
         else:
             assert(trajectory_rep_dim == state_rep_dim)
 
-    def forward(self, trajectory, state):
+    def forward_repeat(self, trajectory, state):
         trajectory_rep = self.trajectory_encoder(trajectory)
         state_rep = self.state_encoder(state)
         if self.mlp:
@@ -192,6 +208,20 @@ class NonLinearNet(nn.Module):
             reward = torch.einsum('bs,bs->b', trajectory_rep, state_rep)
         # breakpoint()
         return reward
+    
+    def forward_no_repeat(self, trajectories):
+        # trajectories: (bsize, L, |S|)
+        trajectory_rep = self.trajectory_encoder(trajectories) # (bsize, rep_dim)
+        states = trajectories.view(-1, trajectories.shape[-1]) # (bsize*L, |S|)
+        state_rep = self.state_encoder(states) # (bsize*L, rep_dim)
+        trajectory_rep_expanded = trajectory_rep.unsqueeze(1).expand(-1, 150, -1) # (bsize, L, rep_dim)
+        trajectory_rep_flattened = trajectory_rep_expanded.reshape(-1, trajectory_rep_expanded.shape[-1]) # (bsize*L, rep_dim)
+        if self.mlp:
+            reward = self.reward_layer(trajectory_rep_flattened, state_rep)
+        else:
+            reward = torch.einsum('bs,bs->b', trajectory_rep_flattened, state_rep)
+        # breakpoint()
+        return reward.view(trajectories.shape[0], -1)
     
 class NonlinearDataset(torch.utils.data.Dataset):
     def __init__(self, states, rewards, num_classes=4):
@@ -260,7 +290,7 @@ def train(args):
 
     num_classes = 6 if args.space_invaders else 4
 
-    net = NonLinearNet(3, 3, 64, 64, num_classes, args.num_trajectory_layers, args.num_state_layers, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid, lstm=args.lstm).cuda()
+    net = NonLinearNet(3, 3, 64, 64, num_classes, args.num_trajectory_layers, args.num_state_layers, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid, lstm=args.lstm, repeat_trajectory_calculations=args.repeat_trajectory_calculations).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
 
@@ -278,13 +308,16 @@ def train(args):
                 # rewards_batch: (bsize, 150)
                 tepoch.set_description(f"Epoch {epoch}")
                 # In effect, we now batch by batch *and* t
-                trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
-                trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
-                states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
-                rewards_batch = rewards_batch.view(-1) # bsize * L
                 if not args.evaluate:
                     optimizer.zero_grad()
-                prediction = net.forward(trajectory_batch, states_batch)
+                if not args.repeat_trajectory_calculations:
+                    prediction = net.forward(states_batch)
+                else:
+                    trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
+                    trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
+                    states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
+                    rewards_batch = rewards_batch.view(-1) # bsize * L
+                    prediction = net.forward(trajectory_batch, states_batch)
                 loss = loss_func(prediction, rewards_batch)
                 wandb.log({'train loss': loss})
                 # loss.backward()
@@ -293,8 +326,8 @@ def train(args):
                     print(rewards_batch)
                     print(torch.max((prediction-rewards_batch)**2))
                     worst = torch.argmax((prediction-rewards_batch)**2)
-                    print(prediction[worst], rewards_batch[worst])
-                    print(net.trajectory_encoder(trajectory_batch[0:(args.batch_size+1)*150:150]))
+                    print(prediction.flatten()[worst], rewards_batch.flatten()[worst])
+                    # print(net.trajectory_encoder(states_batch))
                     # for name, param in net.named_parameters():
                     #     if param.grad is not None:
                     #         grad = torch.max(param.grad)
@@ -327,11 +360,14 @@ def train(args):
                     # rewards_batch: (bsize, 150)
                     tepoch.set_description("Epoch {epoch} (validation)")
                     # In effect, we now batch by batch *and* t
-                    trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
-                    trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
-                    states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
-                    rewards_batch = rewards_batch.view(-1) # bsize * L
-                    prediction = net.forward(trajectory_batch, states_batch)
+                    if not args.repeat_trajectory_calculations:
+                        prediction = net.forward(states_batch)
+                    else:
+                        trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
+                        trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
+                        states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
+                        rewards_batch = rewards_batch.view(-1) # bsize * L
+                        prediction = net.forward(trajectory_batch, states_batch)
                     loss = loss_func(prediction, rewards_batch)
                     avg_loss += loss.item() * args.batch_size * 150
                     n_samples += args.batch_size
