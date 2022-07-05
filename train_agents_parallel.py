@@ -1,5 +1,7 @@
 print("NOTE run with python3.6 on base conda environment in october_miniconda_install")
 
+print("#######################################################################################OUT OF DATE DO NOT RUN###################################################################################")
+
 import stable_baselines3
 import random
 import ray

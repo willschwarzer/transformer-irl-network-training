@@ -327,7 +327,7 @@ def train(args):
                     print(torch.max((prediction-rewards_batch)**2))
                     worst = torch.argmax((prediction-rewards_batch)**2)
                     print(prediction.flatten()[worst], rewards_batch.flatten()[worst])
-                    # print(net.trajectory_encoder(states_batch))
+                    print(net.trajectory_encoder(states_batch))
                     # for name, param in net.named_parameters():
                     #     if param.grad is not None:
                     #         grad = torch.max(param.grad)
