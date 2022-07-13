@@ -12,7 +12,7 @@ import sys
 from tqdm import tqdm
 import wandb
 
-NUM_TRAJ_PER_REWARD = 10000
+NUM_TRAJ_PER_REWARD = 100
 rng = np.random.default_rng()
 
 def parse_args():
@@ -38,8 +38,12 @@ def parse_args():
     parser.add_argument('--num-trajectory-layers', '-ntl', default=1, type=int)
     parser.add_argument('--num-state-layers', '-nsl', default=1, type=int)
     parser.add_argument('--state-hidden-size', '-shs', default=64, type=int)
+    parser.add_argument('--trajectory-hidden-size', '-ths', default=2048, type=int)
     parser.add_argument('--lstm', '-l', action='store_true')
-    parser.add_argument('--repeat-trajectory-calculations', '-rtc', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--repeat-trajectory-calculations', '-rtc', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--trajectory-rep-dim', '-trd', default=3, type=int)
+    parser.add_argument('--state-rep-dim', '-srd', default=3, type=int)
+    parser.add_argument('--ground-truth-weights', '-gtw', default=False, action=argparse.BooleanOptionalAction)
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
@@ -99,14 +103,14 @@ class PositionalEncoder(nn.Module):
 # Check trajectories (certainly don't have enough cap. to memorize illogical differences in dumb Hs)
 # To that end, should also run on space invaders
 class TrajectoryNetTransformer(nn.Module):
-    def __init__(self, num_classes, num_transformer_layers, sigmoid=True):
+    def __init__(self, num_classes, num_transformer_layers, trajectory_hidden_size, trajectory_rep_dim, sigmoid=True):
         super().__init__()
         self.positional_encoder = PositionalEncoder(25*num_classes)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=25*num_classes, nhead=10, batch_first=True)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=25*num_classes, nhead=10, dim_feedforward=trajectory_hidden_size, batch_first=True)
         self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=num_transformer_layers)
         self.linear1 = nn.Linear(25*num_classes, 50)
         self.relu = nn.LeakyReLU()
-        self.linear2 = nn.Linear(50, 3)
+        self.linear2 = nn.Linear(50, trajectory_rep_dim)
         self.sigmoid = nn.Sigmoid() if sigmoid else nn.Identity()
         self.num_classes = num_classes
 
@@ -173,6 +177,7 @@ class NonLinearNet(nn.Module):
                  state_rep_dim, 
                  state_hidden_size, 
                  reward_hidden_size, 
+                 trajectory_hidden_size,
                  num_classes, 
                  num_trajectory_layers, 
                  num_state_layers, 
@@ -182,11 +187,11 @@ class NonLinearNet(nn.Module):
                  repeat_trajectory_calculations=False):
         
         super().__init__()
-        assert trajectory_rep_dim == state_rep_dim == 3, "Variable rep dims not yet implemented!"
+        assert trajectory_rep_dim == state_rep_dim, "Non-matching rep dims not yet implemented!"
         if lstm:
             self.trajectory_encoder = TrajectoryNetLSTM(num_classes, num_trajectory_layers)
         else:
-            self.trajectory_encoder = TrajectoryNetTransformer(num_classes, num_trajectory_layers, trajectory_sigmoid)
+            self.trajectory_encoder = TrajectoryNetTransformer(num_classes, num_trajectory_layers, trajectory_hidden_size, trajectory_rep_dim, trajectory_sigmoid)
         # self.trajectory_encoder = SITrajectoryNet()
         self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_state_layers, num_classes)
         self.mlp = mlp
@@ -209,9 +214,12 @@ class NonLinearNet(nn.Module):
         # breakpoint()
         return reward
     
-    def forward_no_repeat(self, trajectories):
+    def forward_no_repeat(self, trajectories, weights=None):
         # trajectories: (bsize, L, |S|)
-        trajectory_rep = self.trajectory_encoder(trajectories) # (bsize, rep_dim)
+        if weights is None:
+            trajectory_rep = self.trajectory_encoder(trajectories) # (bsize, rep_dim)
+        else:
+            trajectory_rep = weights
         states = trajectories.view(-1, trajectories.shape[-1]) # (bsize*L, |S|)
         state_rep = self.state_encoder(states) # (bsize*L, rep_dim)
         trajectory_rep_expanded = trajectory_rep.unsqueeze(1).expand(-1, 150, -1) # (bsize, L, rep_dim)
@@ -224,21 +232,28 @@ class NonLinearNet(nn.Module):
         return reward.view(trajectories.shape[0], -1)
     
 class NonlinearDataset(torch.utils.data.Dataset):
-    def __init__(self, states, rewards, num_classes=4):
+    def __init__(self, states, rewards, weights, num_classes=4):
         self.states = torch.Tensor(states).to(torch.int64) #(n_examples, L, S); might need to be float
         self.rewards = torch.Tensor(rewards).to(torch.float) #(n_examples, L)
         self.states = F.one_hot(self.states, num_classes=num_classes).view(-1, 150, 25*num_classes)
+        self.weights = weights # usually None
+        if weights is not None:
+            self.weights = torch.Tensor(weights).to(torch.float)
         
     def __len__(self):
         return len(self.states)
     
     def __getitem__(self, index):
-        return self.states[index].cuda().to(torch.float), self.rewards[index].cuda() # returns a whole (L, S), (L, 1) trajectory
+        if self.weights is not None:
+            return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), self.weights[index].cuda() # returns a whole (L, S), (L, 1) trajectory
+        else:
+            return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), None # returns a whole (L, S), (L, 1) trajectory
     
 def get_splits(args):
     if args.space_invaders:
         state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
         reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
+        assert not args.ground_truth_weights, "not implemented yet"
     else:
         state_file = f"states_{args.num_examples}.npy"
         reward_file = f"rewards_{args.num_examples}.npy"
@@ -269,8 +284,20 @@ def get_splits(args):
     val_rewards = rewards_by_reward[val_idxs]
     val_states_flattened = np.reshape(val_states, (-1, val_states.shape[-2], val_states.shape[-1]))
     val_rewards_flattened = np.reshape(val_rewards, (-1, val_rewards.shape[-1]))
-    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened, 6 if args.space_invaders else 4)
-    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, 6 if args.space_invaders else 4)
+    
+    if args.ground_truth_weights:
+        breakpoint()
+        weights_file = f"weights_{args.num_examples}.npy"
+        weights = np.load(weights_file, allow_pickle=True)
+        weights_by_reward = np.reshape(weights, (num_rewards, -1, weights.shape[-1]))
+        train_weights = weights_by_reward[train_idxs]    
+        train_weights_flattened = np.reshape(train_weights, (-1, train_weights.shape[-1]))
+        val_weights = weights_by_reward[val_idxs]
+        val_weights_flattened = np.reshape(val_weights, (-1, val_weights.shape[-1]))
+    else:
+        train_weights_flattened, val_weights_flattened = None, None
+    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened, train_weights_flattened, 6 if args.space_invaders else 4)
+    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, val_weights_flattened, 6 if args.space_invaders else 4)
     
     # training_data, validation_data = random_split(dataset, [train_length, val_length])
     # print("Num training", len(training_data))
@@ -290,7 +317,7 @@ def train(args):
 
     num_classes = 6 if args.space_invaders else 4
 
-    net = NonLinearNet(3, 3, 64, 64, num_classes, args.num_trajectory_layers, args.num_state_layers, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid, lstm=args.lstm, repeat_trajectory_calculations=args.repeat_trajectory_calculations).cuda()
+    net = NonLinearNet(args.trajectory_rep_dim, args.state_rep_dim, args.state_hidden_size, 64, args.trajectory_hidden_size, num_classes, args.num_trajectory_layers, args.num_state_layers, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid, lstm=args.lstm, repeat_trajectory_calculations=args.repeat_trajectory_calculations).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
 
@@ -299,11 +326,14 @@ def train(args):
     
     # TQDM inspiration from https://towardsdatascience.com/training-models-with-a-progress-a-bar-2b664de3e13e
     for epoch in range(args.num_epochs):
-
         avg_loss = 0
         n_samples = 0
+        if args.evaluate:
+            net.eval()
+        else:
+            net.train()
         with tqdm(train_dataloader, unit="batch") as tepoch:
-            for states_batch, rewards_batch in tepoch:
+            for states_batch, rewards_batch, weights_batch in tepoch:
                 # states_batch: (bsize, 150, 100)
                 # rewards_batch: (bsize, 150)
                 tepoch.set_description(f"Epoch {epoch}")
@@ -311,7 +341,11 @@ def train(args):
                 if not args.evaluate:
                     optimizer.zero_grad()
                 if not args.repeat_trajectory_calculations:
-                    prediction = net.forward(states_batch)
+                    if weights_batch is not None:
+                        prediction = net.forward(states_batch, weights_batch)
+                        print(rewards_batch, weights_batch)
+                    else:
+                        prediction = net.forward(states_batch)
                 else:
                     trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
                     trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
@@ -353,15 +387,19 @@ def train(args):
         wandb.log({'average train loss': avg_training_loss})
         avg_loss = 0
         n_samples = 0
+        net.eval()
         with torch.no_grad():
             with tqdm(validation_dataloader, unit="batch") as tepoch:
-                for states_batch, rewards_batch in tepoch:
+                for states_batch, rewards_batch, weights_batch in tepoch:
                     # states_batch: (bsize, 150, 100)
                     # rewards_batch: (bsize, 150)
                     tepoch.set_description("Epoch {epoch} (validation)")
                     # In effect, we now batch by batch *and* t
                     if not args.repeat_trajectory_calculations:
-                        prediction = net.forward(states_batch)
+                        if weights_batch is not None:
+                            prediction = net.forward(states_batch, weights_batch)
+                        else:
+                            prediction = net.forward(states_batch)
                     else:
                         trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
                         trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
@@ -370,7 +408,7 @@ def train(args):
                         prediction = net.forward(trajectory_batch, states_batch)
                     loss = loss_func(prediction, rewards_batch)
                     avg_loss += loss.item() * args.batch_size * 150
-                    n_samples += args.batch_size
+                    n_samples += args.batch_size*150
                     tepoch.set_postfix({"avg validation loss": avg_loss/n_samples})
         avg_loss /= len(validation_dataloader)*150*args.batch_size
         wandb.log({'average validation loss': avg_loss})
