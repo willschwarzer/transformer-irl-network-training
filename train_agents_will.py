@@ -3,6 +3,8 @@ import numpy as np
 import ray
 import argparse
 import psutil
+import wandb
+from wandb.integration.sb3 import WandbCallback
 from spaceinvaders.spaceinvaders_block_env_regression import *
 from new_block_env_new import *
 
@@ -15,19 +17,31 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--max-threads', '-mt', default=50, type=int)
     parser.add_argument('--num-envs', '-ne', default=100, type=int)
+    parser.add_argument('--num-timesteps', '-nt', default=100000, type=int)
     parser.add_argument('--space-invaders', action='store_true')
+    parser.add_argument('--save-dir', type=str)
+    parser.add_argument('--wandb-int', action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
+    args.save_dir == None if args.save_dir.lower() == "none" else args.save_dir
     return args
 
 @ray.remote
-def train_agent(env):
+def train_agent(env, num_timesteps, save_dir, wandb_int):
     st = env_to_str(env)
     print("Training", st, "norm", sum([x ** 2 for x in env.block_rewards]))
-    model = stable_baselines3.PPO("MlpPolicy", env, verbose=1)
-    model.learn(total_timesteps=100000)
-    print("Saving...")
-    model.save("models_regression/" + st)
-    print(st)
+    if wandb_int:
+        run = wandb.init(project="sirl_init_training", reinit=True, sync_tensorboard=True)
+        model = stable_baselines3.PPO("MlpPolicy", env, verbose=1, tensorboard_log=f"runs/{run.id}")
+        model.learn(total_timesteps=num_timesteps, callback=WandbCallback(verbose=2))
+        run.finish()
+    else:
+        model = stable_baselines3.PPO("MlpPolicy", env, verbose=1)
+        model.learn(total_timesteps=num_timesteps)
+    if save_dir is not None:
+        print("Saving...")
+        model.save("models_regression/" + st)
+    else:
+        print("\n\n\n\n\n\n\n NOT SAVING \n\n\n\n\n\n\n\n...")
 
 if __name__ == '__main__':
     args = parse_args()
@@ -44,4 +58,4 @@ if __name__ == '__main__':
             envs.append(SpaceInvadersBlockEnv(reward_set_normed))
         else:
             envs.append(NewBlockEnv(reward_set_normed))
-    ray.get([train_agent.remote(env) for env in envs])
+    ray.get([train_agent.remote(env, args.num_timesteps, args.save_dir, args.wandb_int) for env in envs])

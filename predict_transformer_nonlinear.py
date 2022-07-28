@@ -1,18 +1,28 @@
-from new_block_env import *
-from utils import get_freest_gpu
-import math
 import os
+from utils import get_freest_gpu
+FREEST_GPU = get_freest_gpu()
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = str(FREEST_GPU)
+from new_block_env import *
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import argparse
+import itertools
 from torch.utils.data import random_split, DataLoader
 import numpy as np
 import sys
 from tqdm import tqdm
 import wandb
+import stable_baselines3
+from stable_baselines3.common.evaluation import evaluate_policy
+import new_block_env_new
+import ray
+import psutil
 
 NUM_TRAJ_PER_REWARD = 100
+NUM_AGENTS_PER_GPU = 8
 rng = np.random.default_rng()
 
 def parse_args():
@@ -21,7 +31,7 @@ def parse_args():
                         help='Number of training examples')
     # parser.add_argument('--network-type', type=str, default='transformer',
     #                     help='Type of network to train')
-    parser.add_argument('--save-model', type=bool, default=True,
+    parser.add_argument('--save-model', default=True, action=argparse.BooleanOptionalAction,
                         help='Whether to save the model after every epoch')
     parser.add_argument('--save-to', '-st', type=str, default='nonlinear_model.parameters',
                         help='Destination for saved model')
@@ -44,6 +54,11 @@ def parse_args():
     parser.add_argument('--trajectory-rep-dim', '-trd', default=3, type=int)
     parser.add_argument('--state-rep-dim', '-srd', default=3, type=int)
     parser.add_argument('--ground-truth-weights', '-gtw', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--use-shuffled', '-us', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--ground-truth-phi', '-gtp', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--rl-evaluation', '-re', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--max-threads', '-mt', default=50, type=int, help="For RL evaluation only")
+    parser.add_argument('--reward-batches', '-rb', default=False, action=argparse.BooleanOptionalAction)
     # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
@@ -184,10 +199,12 @@ class NonLinearNet(nn.Module):
                  mlp=False, 
                  trajectory_sigmoid=False, 
                  lstm=False, 
-                 repeat_trajectory_calculations=False):
+                 repeat_trajectory_calculations=False,
+                 ground_truth_phi=False):
         
         super().__init__()
         assert trajectory_rep_dim == state_rep_dim, "Non-matching rep dims not yet implemented!"
+        assert not repeat_trajectory_calculations, "Really shouldn't be repeating calculations"
         if lstm:
             self.trajectory_encoder = TrajectoryNetLSTM(num_classes, num_trajectory_layers)
         else:
@@ -203,8 +220,18 @@ class NonLinearNet(nn.Module):
             self.reward_layer = RewardNet(trajectory_rep_dim, state_rep_dim, reward_hidden_size)
         else:
             assert(trajectory_rep_dim == state_rep_dim)
+        self.ground_truth_phi = ground_truth_phi
+        if ground_truth_phi:
+            self.inv_distances = torch.zeros((5, 5)).float().cuda()
+            for x, y in itertools.product(range(5), repeat=2):
+                if x == 2 and y == 2:
+                    continue
+                self.inv_distances[x, y] = 1/(np.abs(x-2) + np.abs(y-2))
+            self.inv_distances[2, 2] = 20.
+            self.inv_distances = torch.flatten(self.inv_distances)
 
     def forward_repeat(self, trajectory, state):
+        assert False, "no"
         trajectory_rep = self.trajectory_encoder(trajectory)
         state_rep = self.state_encoder(state)
         if self.mlp:
@@ -221,7 +248,15 @@ class NonLinearNet(nn.Module):
         else:
             trajectory_rep = weights
         states = trajectories.view(-1, trajectories.shape[-1]) # (bsize*L, |S|)
-        state_rep = self.state_encoder(states) # (bsize*L, rep_dim)
+        if not self.ground_truth_phi:
+            state_rep = self.state_encoder(states) # (bsize*L, rep_dim)
+        else:
+            # breakpoint()
+            states_unflattened = states.view(-1, 25, 4)
+            inv_distances_unsqueezed = self.inv_distances.unsqueeze(0).unsqueeze(-1)
+            inv_distances_expanded = inv_distances_unsqueezed.expand(states.shape[0], -1, 4)
+            state_rep_with_empties = torch.einsum('bst, bst -> bt', states_unflattened, inv_distances_expanded) # Multiply everything then sum across the 25 squares (s)
+            state_rep = state_rep_with_empties[:, :3]
         trajectory_rep_expanded = trajectory_rep.unsqueeze(1).expand(-1, 150, -1) # (bsize, L, rep_dim)
         trajectory_rep_flattened = trajectory_rep_expanded.reshape(-1, trajectory_rep_expanded.shape[-1]) # (bsize*L, rep_dim)
         if self.mlp:
@@ -247,16 +282,18 @@ class NonlinearDataset(torch.utils.data.Dataset):
         if self.weights is not None:
             return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), self.weights[index].cuda() # returns a whole (L, S), (L, 1) trajectory
         else:
-            return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), None # returns a whole (L, S), (L, 1) trajectory
+            return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), 0 # 0 here is in effect None, just not allowed to use None
     
 def get_splits(args):
+    prefix = "data/"
+    prefix += "shuffled_" if args.use_shuffled else ""
     if args.space_invaders:
         state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
         reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
         assert not args.ground_truth_weights, "not implemented yet"
     else:
-        state_file = f"states_{args.num_examples}.npy"
-        reward_file = f"rewards_{args.num_examples}.npy"
+        state_file = prefix + f"states_{args.num_examples}.npy"
+        reward_file = prefix + f"rewards_{args.num_examples}.npy"
     states = np.load(state_file, allow_pickle=True)
     rewards = np.load(reward_file, allow_pickle=True)
     assert args.num_examples % NUM_TRAJ_PER_REWARD == 0
@@ -269,10 +306,11 @@ def get_splits(args):
     rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))
     if args.permute_types:
         for i in range(num_rewards):
-            permutation = np.arange(3, 6) if args.space_invaders else np.arange(3)
+            permutation = np.arange(3, 6) if args.space_invaders else np.arange(1, 4)
             rng.shuffle(permutation)
             base_classes = np.arange(3 if args.space_invaders else 1)
-            permutations_plus = np.concatenate((base_classes, permutation))
+            assert not args.space_invaders, "I think the next line is wrong order here"
+            permutations_plus = np.concatenate((permutation, base_classes))
             states_by_reward[i] = permutations_plus[states_by_reward[i]]
     train_idxs = reward_idx_list[:train_length]
     val_idxs = reward_idx_list[train_length:]
@@ -285,9 +323,8 @@ def get_splits(args):
     val_states_flattened = np.reshape(val_states, (-1, val_states.shape[-2], val_states.shape[-1]))
     val_rewards_flattened = np.reshape(val_rewards, (-1, val_rewards.shape[-1]))
     
-    if args.ground_truth_weights:
-        breakpoint()
-        weights_file = f"weights_{args.num_examples}.npy"
+    if args.ground_truth_weights or args.rl_evaluation:
+        weights_file = prefix + f"weights_{args.num_examples}.npy"
         weights = np.load(weights_file, allow_pickle=True)
         weights_by_reward = np.reshape(weights, (num_rewards, -1, weights.shape[-1]))
         train_weights = weights_by_reward[train_idxs]    
@@ -306,25 +343,56 @@ def get_splits(args):
     validation_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
     return train_dataloader, validation_dataloader
 
+@ray.remote(num_gpus=1/NUM_AGENTS_PER_GPU)
+def evaluate_rl(traj_rep, state_encoder, weights):
+    means = np.zeros((10, 3), dtype=float)
+    for i in range(10):
+        pred_env = new_block_env_new.NewBlockEnv(traj_rep, state_encoder)
+        ground_truth_env = new_block_env_new.NewBlockEnv(weights)
+        pred_model = stable_baselines3.PPO("MlpPolicy", pred_env, verbose=1)
+        pred_model.learn(total_timesteps=100000)
+        ground_truth_model = stable_baselines3.PPO("MlpPolicy", ground_truth_env, verbose=1)
+        ground_truth_model.learn(total_timesteps=100000)
+        random_model = stable_baselines3.PPO("MlpPolicy", ground_truth_env, verbose=1)
+        mean_ground_truth_pred_model_ret = evaluate_policy(pred_model, ground_truth_env, n_eval_episodes=100)
+        mean_ground_truth_ret = evaluate_policy(ground_truth_model, ground_truth_env, n_eval_episodes=100)
+        mean_random_ret = evaluate_policy(random_model, ground_truth_env, n_eval_episodes=100)
+        means[i] = [mean_ground_truth_pred_model_ret[0], mean_ground_truth_ret[0], mean_random_ret[0]]
+    return np.mean(means, axis=0)
+
 def train(args):
     wandb.init(project='sirl')
     wandb.config.update(args)
     
     train_dataloader, validation_dataloader = get_splits(args)
     
-    freest_gpu = get_freest_gpu()
-    torch.cuda.set_device(f'cuda:{freest_gpu}')
+    # torch.cuda.set_device(f'cuda:{FREEST_GPU}')
 
     num_classes = 6 if args.space_invaders else 4
 
-    net = NonLinearNet(args.trajectory_rep_dim, args.state_rep_dim, args.state_hidden_size, 64, args.trajectory_hidden_size, num_classes, args.num_trajectory_layers, args.num_state_layers, mlp=args.mlp, trajectory_sigmoid=not args.no_trajectory_sigmoid, lstm=args.lstm, repeat_trajectory_calculations=args.repeat_trajectory_calculations).cuda()
+    net = NonLinearNet(args.trajectory_rep_dim, 
+                       args.state_rep_dim, 
+                       args.state_hidden_size, 
+                       64, 
+                       args.trajectory_hidden_size, 
+                       num_classes, 
+                       args.num_trajectory_layers, 
+                       args.num_state_layers, 
+                       mlp=args.mlp, 
+                       trajectory_sigmoid=not args.no_trajectory_sigmoid, 
+                       lstm=args.lstm, 
+                       repeat_trajectory_calculations=args.repeat_trajectory_calculations, 
+                       ground_truth_phi = args.ground_truth_phi).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
 
     optimizer = torch.optim.Adam(net.parameters()) if not args.evaluate else None
     loss_func = nn.MSELoss()
     
+    # assert args.rl_evaluation == args.ground_truth_weights, "You're using ground truth weights, are you sure you want to do that?"
+    
     # TQDM inspiration from https://towardsdatascience.com/training-models-with-a-progress-a-bar-2b664de3e13e
+
     for epoch in range(args.num_epochs):
         avg_loss = 0
         n_samples = 0
@@ -334,6 +402,8 @@ def train(args):
             net.train()
         with tqdm(train_dataloader, unit="batch") as tepoch:
             for states_batch, rewards_batch, weights_batch in tepoch:
+                # if torch.any(torch.all(weights_batch < 0, axis=1)):
+                    # breakpoint()
                 # states_batch: (bsize, 150, 100)
                 # rewards_batch: (bsize, 150)
                 tepoch.set_description(f"Epoch {epoch}")
@@ -341,9 +411,10 @@ def train(args):
                 if not args.evaluate:
                     optimizer.zero_grad()
                 if not args.repeat_trajectory_calculations:
-                    if weights_batch is not None:
+                    if args.ground_truth_weights:
+                        # breakpoint()
+                        # print(rewards_batch[-1])
                         prediction = net.forward(states_batch, weights_batch)
-                        print(rewards_batch, weights_batch)
                     else:
                         prediction = net.forward(states_batch)
                 else:
@@ -373,6 +444,15 @@ def train(args):
                 if not args.evaluate:
                     loss.backward()
                     optimizer.step()
+                if args.rl_evaluation and tepoch.n % 100 == 0 or tepoch.n % 101 == 0:
+                    # n_threads = min(args.max_threads, psutil.cpu_count()-1)
+                    traj_reps = net.trajectory_encoder(states_batch).cpu().detach().numpy()
+                    ray.init(num_cpus=NUM_AGENTS_PER_GPU, num_gpus=1)
+                    rets = ray.get([evaluate_rl.remote(traj_rep, net.state_encoder, weights) for traj_rep, weights in zip(traj_reps, weights_batch.detach().cpu().numpy())])
+                    for ret in rets:
+                        wandb.log({"rl_pred": ret[0], "rl_true": ret[1], "rl_random": ret[2]})
+                    ray.shutdown()
+                        
                 tepoch.set_postfix({"avg loss": avg_loss/n_samples})
 
         avg_loss /= len(train_dataloader)*150*args.batch_size
@@ -396,7 +476,7 @@ def train(args):
                     tepoch.set_description("Epoch {epoch} (validation)")
                     # In effect, we now batch by batch *and* t
                     if not args.repeat_trajectory_calculations:
-                        if weights_batch is not None:
+                        if args.ground_truth_weights:
                             prediction = net.forward(states_batch, weights_batch)
                         else:
                             prediction = net.forward(states_batch)

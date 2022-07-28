@@ -1,12 +1,11 @@
-import torch
 import numpy as np
 from pynvml import *
 
 def get_freest_gpu():
-    num_devices = torch.cuda.device_count()
     nvmlInit()
+    NUM_DEVICES = 4
     free_mems = []
-    for i in range(num_devices):
+    for i in range(NUM_DEVICES):
         h = nvmlDeviceGetHandleByIndex(i)
         info = nvmlDeviceGetMemoryInfo(h)
         free_mems.append(info.free)
