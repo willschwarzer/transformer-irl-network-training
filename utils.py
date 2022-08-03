@@ -13,3 +13,14 @@ def get_freest_gpu():
     # mems = [torch.cuda.memory_allocated(i) for i in range(num_devices)]
     # mems2 = [torch.cuda.memory_reserved(i) for i in range(num_devices)]
     # return mems, mems2
+    
+def convert_chai_rollouts(rollouts):
+    states = np.zeros((len(rollouts), 150, 25), dtype=int)
+    rewards = np.zeros((len(rollouts), 150), dtype=float)
+    for idx, rollout in enumerate(rollouts):
+        states[idx] = rollout.obs[:-2]
+        rewards[idx] = rollout.rews[:-1]
+    return states, rewards
+
+def yooooo():
+    print("yoooo")
