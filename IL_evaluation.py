@@ -23,7 +23,7 @@ import ray
 import wandb
 
 NUM_AGENTS_PER_GPU = 10
-NUM_ROLLOUTS_PER_AGENT = 100
+NUM_ROLLOUTS_PER_AGENT = 10000
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train supervised IRL models')
@@ -34,12 +34,20 @@ def parse_args():
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
     parser.add_argument('--max-threads', '-mt', default=50, type=int)
+    parser.add_argument('--average-traj-reps', '-atr', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
     return args
 
 @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
 def evaluate_random(env):
     model = stable_baselines3.PPO("MlpPolicy", env, verbose=1)
+    mean_random_ret, _ = evaluate_policy(model, env, n_eval_episodes=100)
+    return mean_random_ret
+
+@ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
+def evaluate_random_rew(env, model_name):
+    print("USING models_regression BY DEFAULT")
+    model = stable_baselines3.PPO.load("models_regression" + "/" + model_name, env)
     mean_random_ret, _ = evaluate_policy(model, env, n_eval_episodes=100)
     return mean_random_ret
 
@@ -85,12 +93,12 @@ def evaluate_adversarial(rollouts, env, alg):
         reward_net=reward_net,
         allow_variable_horizon=True,
     )
-    adversarial_trainer.train(100000)
+    adversarial_trainer.train(1000000)
     mean_ret, _ = evaluate_policy(learner, env, n_eval_episodes=1)
     return mean_ret
     
 
-def load_model():
+def load_model(location):
     state_hidden_size = 2048
     num_state_layers = 2
     trajectory_hidden_size = 2048
@@ -101,11 +109,12 @@ def load_model():
     repeat_trajectory_calculations = False
     num_classes = 4
     net = NonLinearNet(3, 3, state_hidden_size, 64, trajectory_hidden_size, num_classes, num_trajectory_layers, num_state_layers, mlp=mlp, trajectory_sigmoid=trajectory_sigmoid, lstm=lstm, repeat_trajectory_calculations=repeat_trajectory_calculations).cuda()
+    net.load_state_dict(torch.load(location))
     return net
 
 def main(args):
-    wandb.init(project=args.wandb_project, resume="must", id="38sdg0ro")
-    model = load_model()
+    wandb.init(project=args.wandb_project)
+    model = load_model(args.model)
     state_encoder = model.state_encoder
     trajectory_encoder = model.trajectory_encoder
     weights = np.load(args.weights)
@@ -114,23 +123,34 @@ def main(args):
     print(weights.shape)
     rollouts = load(args.data)
     states, _ = convert_chai_rollouts(rollouts)
-    rollout_batches = [rollouts[i:(i+NUM_ROLLOUTS_PER_AGENT)] for i in range(len(rollouts)//100)]
+    rollout_batches = [rollouts[i:(i+NUM_ROLLOUTS_PER_AGENT)] for i in range(len(rollouts)//NUM_ROLLOUTS_PER_AGENT)]
     state_batches_np = states.reshape(-1, NUM_ROLLOUTS_PER_AGENT, 150, 25)
     state_batches_int = torch.Tensor(state_batches_np).to(torch.int64)
     state_batches = F.one_hot(state_batches_int, num_classes=4).view(-1, NUM_ROLLOUTS_PER_AGENT, 150, 100).to(torch.float)
+    models_directory = "models_regression"
+    models = os.listdir(models_directory)
+    np.random.shuffle(models)
+    models = [models[i:(i+10)] for i in range(len(models)//10)]
     ray.init(num_cpus=10, num_gpus=1)
-    for rollout_batch, traj_batch, weights in zip(rollout_batches[10:], state_batches[10:], weights[10:]):
+    for rollout_batch, traj_batch, weights, model_batch in zip(rollout_batches, state_batches, weights, models):
         ground_truth_env = NewBlockEnv(weights)
-        # Random
-        random_rets = ray.get([evaluate_random.remote(ground_truth_env) for i in range(100)])
-        ave_random_ret = np.mean(random_rets)
+        # Random agent
+        # random_rets = ray.get([evaluate_random.remote(ground_truth_env) for i in range(100)])
+        # ave_random_ret = np.mean(random_rets)
+        
+        # Trained agent on random rewards
+        random_rew_rets = ray.get([evaluate_random_rew.remote(ground_truth_env, model_name) for model_name in model_batch])
+        ave_random_rew_ret = np.mean(random_rew_rets)
         
         # Ground truth
         ground_truth_rets = ray.get([evaluate_ground_truth.remote(ground_truth_env) for i in range(10)])
         ave_ground_truth_ret = np.mean(ground_truth_rets)
         
         # Our method
-        traj_rep = trajectory_encoder(traj_batch.cuda()).mean(axis=0).cpu().detach().numpy()
+        if args.average_traj_reps:
+            traj_rep = trajectory_encoder(traj_batch[:256].cuda()).mean(axis=0).cpu().detach().numpy()
+        else:
+            traj_rep = trajectory_encoder(traj_batch[0].unsqueeze(0).cuda()).squeeze().cpu().detach().numpy()
         sirl_rets = ray.get([evaluate_sirl.remote(traj_rep, state_encoder, ground_truth_env) for i in range(10)])
         ave_sirl_ret = np.mean(sirl_rets)
         
@@ -142,7 +162,8 @@ def main(args):
         airl_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'airl') for i in range(10)])
         ave_airl_ret = np.mean(airl_rets)
         
-        wandb.log({'random_ret': ave_random_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})
+        # wandb.log({'random_ret': ave_random_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})
+        wandb.log({'random_rew_ret': ave_random_rew_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})
 
 if __name__ == "__main__":
     args = parse_args()
