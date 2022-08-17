@@ -9,14 +9,14 @@ import jax.numpy as jnp
 from jax import random
 from jax import jit
 from functools import partial
-import torch
-import torch.nn.functional as F
+# import torch
+# import torch.nn.functional as F
 
 REWARD_BOUND = 100
 NUM_BLOCKS = 3 # number of blocks which can be assigned a type
 MAX_MVT_DIST = 1
 MIN_BLOCK_DIST = 0.01 # To bound reward
-ENV_SIZE = 100
+ENV_SIZE = 1
 
 class ObjectEnv(gym.Env):
 
