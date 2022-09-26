@@ -444,7 +444,7 @@ def train(args):
                 if not args.evaluate:
                     loss.backward()
                     optimizer.step()
-                if args.rl_evaluation and tepoch.n % 100 == 0 or tepoch.n % 101 == 0:
+                if args.rl_evaluation and (tepoch.n % 100 == 0 or tepoch.n % 101 == 0):
                     # n_threads = min(args.max_threads, psutil.cpu_count()-1)
                     traj_reps = net.trajectory_encoder(states_batch).cpu().detach().numpy()
                     ray.init(num_cpus=NUM_AGENTS_PER_GPU, num_gpus=1)
