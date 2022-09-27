@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from jax import random
 from jax import jit
 from functools import partial
+import jax
 import cv2 as cv
 import palettable
 from palettable.tableau import TableauLight_10, ColorBlind_10
@@ -29,7 +30,8 @@ class ObjectEnv(gym.Env):
         # else:
         #     self.state_rep = self._get_dist_sums
         
-        assert !manual_clipping, "I really don't think you want to do that"
+        assert not manual_clipping, "I really don't think you want to do that"
+        assert move_allowance, "Always using this now"
         self.nsteps = 0
         self.env_size = env_size
         self.num_blocks = num_blocks
@@ -42,6 +44,7 @@ class ObjectEnv(gym.Env):
         self.min_block_dist = min_block_dist
         self.intersection = intersection
         self.manual_clipping = manual_clipping
+        self.single_move = single_move
         self.palette = TableauLight_10.colors
         
         self.key = random.PRNGKey(seed)
@@ -75,9 +78,6 @@ class ObjectEnv(gym.Env):
 
         self.nsteps += 1
         done = self.nsteps > self.episode_len
-        if done:
-            print(action)
-            print(reward)
 
         return self.state, reward, done, {}
 
@@ -173,9 +173,9 @@ def _step(state, action, weights, state_bounds, move_allowance, min_block_dist, 
     #     # breakpoint()
     return state, reward
 
-@partial(jit, static_argnums=(3,))
+@partial(jit, static_argnums=(3, 4))
 # @partial(jit, static_argnums=(3,))
-def _next_state(state, action, state_bounds, move_allowance):
+def _next_state(state, action, state_bounds, move_allowance, single_move):
     # action = action.at[:-2].set(0)
     # action = action.at[-1].set(0)
     moves = jnp.reshape(action, (len(state), 2))
@@ -184,6 +184,11 @@ def _next_state(state, action, state_bounds, move_allowance):
         # allowance = jnp.reshape(action[:len(state)], (len(state), 1))
         # moves = jnp.reshape(action[len(state):], (len(state), 2)) * allowance
         move_dists = jnp.sqrt(jnp.sum(moves**2, axis=-1))
+        if single_move:
+            mask = jnp.zeros(len(moves))
+            mask = jnp.expand_dims(mask.at[jnp.argmax(move_dists)].set(1), 1)
+            moves *= mask
+            move_dists = jnp.sqrt(jnp.sum(moves**2, axis=-1))
         total_dist = jnp.sum(move_dists)
         moves *= jnp.minimum(move_allowance/total_dist, 1)
     state += moves
