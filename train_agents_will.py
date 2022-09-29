@@ -1,4 +1,4 @@
-from utils import get_freest_gpu, convert_chai_rollouts
+from utils import get_freest_gpu
 import os
 FREEST_GPU = get_freest_gpu()
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

@@ -1,3 +1,10 @@
+from utils import get_freest_gpu
+import os
+FREEST_GPU = get_freest_gpu()
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = str(FREEST_GPU)
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+from object_env import ObjectEnv
 import numpy as np
 import stable_baselines3
 import imitation
@@ -11,9 +18,11 @@ from new_block_env_new import *
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 import ray
 
-# Currently not using gpu until I tell it how many are required
-@ray.remote
-def get_examples_regression(model_name, num_examples, space_invaders, non_linear, verbose, chai_rollouts):
+NUM_WORKERS_PER_GPU = 20
+rng = np.random.default_rng()
+
+@ray.remote(num_gpus=1/(NUM_WORKERS_PER_GPU))
+def get_examples_regression(model_dir, model_name, num_examples, env, non_linear, verbose, chai_rollouts, num_rings):
     # stupidest thing I've ever seen, this doesn't load if it's not in the ray remote
     from imitation.data import rollout
     def string_to_rewards(st):
@@ -23,12 +32,19 @@ def get_examples_regression(model_name, num_examples, space_invaders, non_linear
 
     if verbose >= 1:
         print("Rewards", weights)
-    if space_invaders:
+        
+    if "invaders" in env or "space" in env:
         env = SpaceInvadersBlockEnv(weights)
-    else:
+        L = 150
+    elif "ring" in env or "object" in env:
+        seed = rng.integers(10000)
+        env = ObjectEnv(weights, num_rings=num_rings, seed=seed, env_size=1, move_allowance=True, episode_len=50, min_block_dist=0.25, intersection=True, max_move_dist=0.1, block_thickness=2, single_move=True)
+        L = 50
+    elif "grid" in env:
         env = NewBlockEnv(weights)
-    models_directory = "models_regression"
-    model = stable_baselines3.PPO.load(models_directory + "/" + model_name, env)
+        L = 150
+    
+    model = stable_baselines3.PPO.load(os.path.join(model_dir, model_name), env)
 
     if chai_rollouts:
         rollouts = rollout.rollout(
@@ -47,10 +63,10 @@ def get_examples_regression(model_name, num_examples, space_invaders, non_linear
         for _ in range(num_examples):
             data = []
             obs = env.reset()
-            for i in range(150):
+            for i in range(L):
                 action, _states = model.predict(obs)
-                obs, rewards, dones, info = env.step(action)
-                data.append((obs, rewards))
+                obs, reward, dones, _ = env.step(action)
+                data.append((np.asarray(obs), np.asarray(reward)))
             if non_linear:
                 example = {"data": data, "weights": weights}
             else:
@@ -67,14 +83,16 @@ def get_examples_regression(model_name, num_examples, space_invaders, non_linear
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--model-dir', '-md', type=str)
     parser.add_argument('--max-threads', '-mt', default=50, type=int)
     parser.add_argument('--out', '-o', type=str, default='examples')
     parser.add_argument('--non-linear', '-nl', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--num-examples', '-ne', type=int, default=1000)
     parser.add_argument('--num-models', '-nm', type=int, default=0)
-    parser.add_argument('--space-invaders', '-si', action='store_true')
+    parser.add_argument('--env', type=str, default="rings")
     parser.add_argument('--verbose', '-v', type=int, default=0)
     parser.add_argument('--chai-rollouts', '-cr', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--num-rings', default=5, type=int, help="only used for ring env") 
     args = parser.parse_args()
     return args
 
@@ -85,11 +103,10 @@ ray.init(num_cpus=n_threads)
 # ray.init()
 print(ray.available_resources())
 print(psutil.cpu_count())
-models_directory = "models_regression"
-models = os.listdir(models_directory)
+models = os.listdir(args.model_dir)
 print(f"Found {len(models)} models")
 num_models = len(models) if args.num_models == 0 else args.num_models
-outs = ray.get([get_examples_regression.remote(model_name, args.num_examples, args.space_invaders, args.non_linear, args.verbose, args.chai_rollouts) for model_name in models[:num_models]])
+outs = ray.get([get_examples_regression.remote(args.model_dir, model_name, args.num_examples, args.env, args.non_linear, args.verbose, args.chai_rollouts, args.num_rings) for model_name in models[:num_models]])
 
 if args.chai_rollouts:
     rollouts = [ex[0] for ex in outs]
@@ -101,4 +118,6 @@ if args.chai_rollouts:
 else:
     for out in outs:
         all_examples.extend(outs)
-    np.save(args.out + '_' + str(len(all_examples)) + ".npy", all_examples)
+    breakpoint()
+    # np.save(args.out + '_' + str(len(all_examples)) + ".npy", all_examples)
+    
