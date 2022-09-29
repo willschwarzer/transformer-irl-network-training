@@ -30,12 +30,14 @@ def parse_args():
     parser.add_argument('--alg', type=str, default="PPO")
     parser.add_argument('--save-dir', type=str)
     parser.add_argument('--wandb-int', action=argparse.BooleanOptionalAction)
-    parser.add_argument('--num-rings', default=5, type=int, help="only used for ring env") 
+    parser.add_argument('--num-rings', default=5, type=int, help="only used for ring env")
+    parser.add_argument('--single-move', action=argparse.BooleanOptionalAction, help="only used for ring env")
     args = parser.parse_args()
     args.save_dir == None if args.save_dir.lower() == "none" else args.save_dir
     return args
 
-@ray.remote(num_gpus=1/(NUM_WORKERS_PER_GPU))
+# @ray.remote(num_gpus=1/(NUM_WORKERS_PER_GPU))
+@ray.remote
 def train_agent(env, num_timesteps, save_dir, wandb_int):
     st = env_to_str(env)
     print("Training", st, "norm", sum([x ** 2 for x in env.object_rewards]))
@@ -57,8 +59,9 @@ if __name__ == '__main__':
     args = parse_args()
     assert 'ring' in args.env or 'object' in args.env, "Need to change block_rewards to object_rewards in other envs"
     n_threads = min(args.max_threads, psutil.cpu_count()-1)
-    ray.init(num_cpus=min(n_threads, NUM_WORKERS_PER_GPU))
-    # ray.init()
+    # ray.init(num_cpus=min(n_threads, NUM_WORKERS_PER_GPU))
+    ray.init(num_cpus=n_threads)
+    print("XXXXXXXXXXXXXXXXXXXXXXXXXXXX NOT USING GPU XXXXXXXXXXXXXXXXXXXXXXXXXXXX")
     print(ray.available_resources())
     print(psutil.cpu_count())
     if "ring" in args.env or "object" in args.env:
@@ -72,7 +75,7 @@ if __name__ == '__main__':
             envs.append(SpaceInvadersBlockEnv(reward_set_normed))
         elif "ring" in args.env or "object" in args.env:
             seed = rng.integers(10000)
-            envs.append(ObjectEnv(reward_set_normed, num_rings=args.num_rings, seed=seed, env_size=1, move_allowance=True, episode_len=50, min_block_dist=0.25, intersection=True, max_move_dist=0.1, block_thickness=2, single_move=True))
+            envs.append(ObjectEnv(reward_set_normed, num_rings=args.num_rings, seed=seed, env_size=1, move_allowance=True, episode_len=50, min_block_dist=0.25, intersection=True, max_move_dist=0.1, block_thickness=2, single_move=args.single_move))
         elif "grid" in args.env:
             envs.append(NewBlockEnv(reward_set_normed))
     ray.get([train_agent.remote(env, args.num_timesteps, args.save_dir, args.wandb_int) for env in envs])
