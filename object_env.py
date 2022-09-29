@@ -21,9 +21,9 @@ IM_SIZE = 256
 BLOCK_SIZE = 8
 
 class ObjectEnv(gym.Env):
-    def __init__(self, block_rewards, state_rep_model=None, seed=0, env_size=10, num_blocks=3, move_allowance=True, im_size=256, block_size=16, block_thickness=4, episode_len=150, max_move_dist=1, act_space_bounds=1e9, min_block_dist=0.01, intersection=False, manual_clipping=False, single_move=False):
+    def __init__(self, object_rewards, state_rep_model=None, seed=0, env_size=10, num_rings=3, move_allowance=True, im_size=256, block_size=16, block_thickness=4, episode_len=150, max_move_dist=1, act_space_bounds=1e9, min_block_dist=0.01, intersection=False, manual_clipping=False, single_move=False):
         super().__init__()
-        assert(len(block_rewards) == (num_blocks*(num_blocks-1)//2))
+        assert(len(object_rewards) == (num_rings*(num_rings-1)//2))
 
         # if state_rep is not None:
         #     self.state_rep = state_rep
@@ -33,8 +33,9 @@ class ObjectEnv(gym.Env):
         assert not manual_clipping, "I really don't think you want to do that"
         assert move_allowance, "Always using this now"
         self.nsteps = 0
+        self.object_rewards = object_rewards
         self.env_size = env_size
-        self.num_blocks = num_blocks
+        self.num_rings = num_rings
         self.move_allowance = move_allowance
         self.im_size = im_size
         self.block_size = block_size
@@ -51,26 +52,26 @@ class ObjectEnv(gym.Env):
         
         # Make a triangular-array-compatible weight vector to allow for efficient
         # computation later
-        tril = jnp.tril(jnp.ones([num_blocks, num_blocks]), k=-1) # Lower triangle of matrix, not including main diag
-        expanded_block_rewards = tril.at[jnp.nonzero(tril)].set(block_rewards)
+        tril = jnp.tril(jnp.ones([num_rings, num_rings]), k=-1) # Lower triangle of matrix, not including main diag
+        expanded_object_rewards = tril.at[jnp.nonzero(tril)].set(object_rewards)
         
         self.state_bounds = jnp.array([-env_size/2, env_size/2], dtype=float)
         
-        self.expanded_block_rewards = expanded_block_rewards
+        self.expanded_object_rewards = expanded_object_rewards
         self.state_rep_model = state_rep_model
         
-        self.action_space = spaces.Box(low=-act_space_bounds, high=act_space_bounds, shape=(num_blocks*2,))
-        self.observation_space = spaces.Box(low=-env_size/2, high=env_size/2, shape=(num_blocks, 2))
+        self.action_space = spaces.Box(low=-act_space_bounds, high=act_space_bounds, shape=(num_rings*2,))
+        self.observation_space = spaces.Box(low=-env_size/2, high=env_size/2, shape=(num_rings, 2))
         
-        self.state, self.key = _init_state(self.key, num_blocks, env_size)
+        self.state, self.key = _init_state(self.key, num_rings, env_size)
         
 
     def step(self, action, alt_reward=[0,0,0], render=False):
         action = jnp.array(action)
         if self.state_rep_model is None:
             # breakpoint()
-            self.state, reward = _step(self.state, action, self.expanded_block_rewards, self.state_bounds, self.move_allowance*self.max_move_dist, self.min_block_dist, self.intersection, self.manual_clipping, self.single_move)
-            # self.state, reward = _step(self.state, action, self.expanded_block_rewards, self.state_bounds)
+            self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds, self.move_allowance*self.max_move_dist, self.min_block_dist, self.intersection, self.manual_clipping, self.single_move)
+            # self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds)
         else:
             raise NotImplementedError("Nope")
             self.state = _next_state(self.state, action, self.state_bounds)
@@ -83,12 +84,12 @@ class ObjectEnv(gym.Env):
 
     def reset(self):
         # print(self.state)
-        self.state, self.key = _init_state(self.key, self.num_blocks, self.env_size)
+        self.state, self.key = _init_state(self.key, self.num_rings, self.env_size)
         # self.state = jnp.clip(self.state, self.state_bounds[0] - 0.5, self.state_bounds[1] - 0.5)
         # self.state = self.state.at[1].set(self.state[0] + 0.5)
         # self.state = jnp.clip(self.state, self.state_bounds[0], self.state_bounds[1])
         self.nsteps = 0
-        # print(_get_reward(self.state, self.expanded_block_rewards))
+        # print(_get_reward(self.state, self.expanded_object_rewards))
         
         return self.state
 
@@ -129,18 +130,18 @@ class ObjectEnv(gym.Env):
     
     def display_weights(self):
         size = 1024
-        num_squares = self.num_blocks
+        num_squares = self.num_rings
         square_width = 1024//num_squares
         im = np.zeros((size, size, 3), dtype=np.uint8)
-        for i in range(self.num_blocks-1):
+        for i in range(self.num_rings-1):
             start = square_width*(i+1)
             cv.rectangle(im, (start, 0), (start+square_width, square_width), self.palette[i+1], -1)
-            if i != self.num_blocks - 1:
+            if i != self.num_rings - 1:
                 cv.rectangle(im, (0, start), (square_width, start+square_width), self.palette[i], -1)
-        for block_1 in range(self.num_blocks):
-            for block_2 in range(block_1+1, self.num_blocks):
+        for block_1 in range(self.num_rings):
+            for block_2 in range(block_1+1, self.num_rings):
                 start = (square_width*(block_2), square_width*(block_1+1))
-                num = self.expanded_block_rewards[block_2][block_1]
+                num = self.expanded_object_rewards[block_2][block_1]
                 scale = 10/num_squares
                 (box_width, box_height), baseline = cv.getTextSize("{:.2f}".format(abs(num)), cv.FONT_HERSHEY_SIMPLEX, scale, int(scale*1.5))
                 org = (start[0] + (square_width-box_width)//2, start[1] + box_height + baseline + (square_width-box_height -baseline)//2)
@@ -153,9 +154,9 @@ class ObjectEnv(gym.Env):
             
 
 @partial(jit, static_argnums=(1, 2))
-def _init_state(key, num_blocks, env_size):
+def _init_state(key, num_rings, env_size):
     key, subkey = random.split(key)
-    state = random.uniform(subkey, shape=(num_blocks, 2), minval=-env_size/2, maxval=env_size/2)
+    state = random.uniform(subkey, shape=(num_rings, 2), minval=-env_size/2, maxval=env_size/2)
     return state, key
 
 @partial(jit, static_argnums=(4, 5, 6, 7, 8))
@@ -197,7 +198,7 @@ def _next_state(state, action, state_bounds, move_allowance, single_move):
 
 @partial(jit, static_argnums=(2, 3))
 def _get_reward(state, weights, min_block_dist, intersection):
-    # state: (num_blocks, 2)
+    # state: (num_rings, 2)
     num_pairs = len(state)*(len(state)-1)//2
     obj_matrix_a = jnp.expand_dims(state, 1)
     obj_matrix_b = jnp.expand_dims(state, 0)
