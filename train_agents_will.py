@@ -52,6 +52,7 @@ def train_agent(env, num_timesteps, save_dir, wandb_int):
     if save_dir is not None:
         print("Saving...")
         model.save(os.path.join(save_dir, st))
+        print("Saved")
     else:
         print("\n\n\n\n\n\n\n NOT SAVING \n\n\n\n\n\n\n\n...")
 
@@ -78,4 +79,5 @@ if __name__ == '__main__':
             envs.append(ObjectEnv(reward_set_normed, num_rings=args.num_rings, seed=seed, env_size=1, move_allowance=True, episode_len=50, min_block_dist=0.25, intersection=True, max_move_dist=0.1, block_thickness=2, single_move=args.single_move))
         elif "grid" in args.env:
             envs.append(NewBlockEnv(reward_set_normed))
+    print(f"Training {len(envs)} agents")
     ray.get([train_agent.remote(env, args.num_timesteps, args.save_dir, args.wandb_int) for env in envs])
