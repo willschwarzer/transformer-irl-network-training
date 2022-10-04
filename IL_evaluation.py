@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
     parser.add_argument('--max-threads', '-mt', default=50, type=int)
     parser.add_argument('--average-traj-reps', '-atr', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--env', default='rings', type=str)
     args = parser.parse_args()
     return args
 
@@ -98,7 +99,9 @@ def evaluate_adversarial(rollouts, env, alg):
     return mean_ret
     
 
-def load_model(location):
+def load_model(location, obs_size, horizon):
+    trajectory_rep_dim = 100
+    state_rep_dim = 100
     state_hidden_size = 2048
     num_state_layers = 2
     trajectory_hidden_size = 2048
@@ -107,21 +110,33 @@ def load_model(location):
     trajectory_sigmoid = False
     lstm = False
     repeat_trajectory_calculations = False
-    num_classes = 4
-    net = NonLinearNet(3, 3, state_hidden_size, 64, trajectory_hidden_size, num_classes, num_trajectory_layers, num_state_layers, mlp=mlp, trajectory_sigmoid=trajectory_sigmoid, lstm=lstm, repeat_trajectory_calculations=repeat_trajectory_calculations).cuda()
+    ground_truth_phi = False
+    
+    net = NonLinearNet(trajectory_rep_dim, state_rep_dim, state_hidden_size, 64, trajectory_hidden_size, obs_size, horizon, num_trajectory_layers, num_state_layers, mlp=mlp, trajectory_sigmoid=trajectory_sigmoid, lstm=lstm, repeat_trajectory_calculations=repeat_trajectory_calculations, ground_truth_phi = ground_truth_phi).cuda() # Maybe shouldn't make this cuda
     net.load_state_dict(torch.load(location))
     return net
 
 def main(args):
     wandb.init(project=args.wandb_project)
-    model = load_model(args.model)
+    if "grid" in args.env:
+        obs_size = 4*25
+        horizon = 150
+    elif "space" in args.env:
+        obs_size = 6*25
+        horizon = 150
+    elif "ring" in args.env or "object" in env:
+        obs_size = 2*args.num_rings
+        horizon = 50
+    else:
+        raise NotImplementedError
+    model = load_model(args.model, obs_size, horizon)
     state_encoder = model.state_encoder
     trajectory_encoder = model.trajectory_encoder
-    weights = np.load(args.weights)
+    weights = np.load(f"data/{args.weights}")
     # weight_batches_redundant = weights.reshape(-1, 100, 3)
     # weight_batches = weight_batches_redundant[:, 0, :].squeeze()
     print(weights.shape)
-    rollouts = load(args.data)
+    rollouts = load(f"data/{args.data}")
     states, _ = convert_chai_rollouts(rollouts)
     rollout_batches = [rollouts[i:(i+NUM_ROLLOUTS_PER_AGENT)] for i in range(len(rollouts)//NUM_ROLLOUTS_PER_AGENT)]
     state_batches_np = states.reshape(-1, NUM_ROLLOUTS_PER_AGENT, 150, 25)

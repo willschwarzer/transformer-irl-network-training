@@ -57,7 +57,7 @@ def get_examples_regression(model_dir, model_name, num_examples, env, non_linear
     rollout.make_sample_until(min_timesteps=None, min_episodes=int(num_examples*1.3)),
 )
         for rollout in rollouts:
-            if rollout.obs.shape[0] != 152:
+            if rollout.obs.shape[0] != L+2: # ask CHAI why this is L+2, not me
                 rollouts.remove(rollout)
         assert len(rollouts) >= num_examples, "Too many bugged rollouts (L < 150)"
         rollouts = rollouts[:num_examples]
@@ -143,8 +143,8 @@ if args.chai_rollouts:
     weights = [ex[1] for ex in outs]
     for rollout in rollouts:
         all_examples.extend(rollout)
-    save("_".join([args.out, "chai", str(len(all_examples))]), all_examples)
-    np.save("_".join(["weights", "chai", str(len(all_examples))]), weights)
+    save(f"data/{args.out}", all_examples)
+    np.save(f"data/{args.out}_weights", weights)
 elif not args.process_data:
     for out in outs:
         all_examples.extend(outs)

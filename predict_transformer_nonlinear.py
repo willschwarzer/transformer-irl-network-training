@@ -27,8 +27,8 @@ rng = np.random.default_rng()
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train supervised IRL models')
-    parser.add_argument('--num-examples', type=int, default=4600,
-                        help='Number of training examples')
+    # parser.add_argument('--num-examples', type=int, default=4600,
+    #                     help='Number of training examples')
     # parser.add_argument('--network-type', type=str, default='transformer',
     #                     help='Type of network to train')
     parser.add_argument('--save-model', default=True, action=argparse.BooleanOptionalAction,
@@ -43,8 +43,8 @@ def parse_args():
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
     parser.add_argument('--permute-types', '-pt', action='store_true')
-    parser.add_argument('--no-trajectory-sigmoid', '-nts', action='store_true')
-    parser.add_argument('--space-invaders', '-si', default=True, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--trajectory-sigmoid', '-nts', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--env', default="rings", type=str)
     parser.add_argument('--num-trajectory-layers', '-ntl', default=1, type=int)
     parser.add_argument('--num-state-layers', '-nsl', default=1, type=int)
     parser.add_argument('--state-hidden-size', '-shs', default=64, type=int)
@@ -58,10 +58,16 @@ def parse_args():
     parser.add_argument('--ground-truth-phi', '-gtp', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--rl-evaluation', '-re', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--max-threads', '-mt', default=50, type=int, help="For RL evaluation only")
-    parser.add_argument('--reward-batches', '-rb', default=False, action=argparse.BooleanOptionalAction)
-    # parser.add_argument('--dataset-file', '-df', type=str, default="examples_test_4600.npy")
+    parser.add_argument('--num-rings', '-nr', default=5, type=int, help="For ring env only")
+    # parser.add_argument('--reward-batches', '-rb', default=False, action=argparse.BooleanOptionalAction)
+    # XXX what is reward batches for?
+    parser.add_argument('--data-prefix', '-dp', type=str, default="rings_multimove")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
+    
+    
+    assert args.env == "rings", "remember to change the dataset names"
+    assert not args.permute_types, "we're not sure this is correct, remember?"
     return args
 
 class PositionalEncoder(nn.Module):
@@ -118,22 +124,23 @@ class PositionalEncoder(nn.Module):
 # Check trajectories (certainly don't have enough cap. to memorize illogical differences in dumb Hs)
 # To that end, should also run on space invaders
 class TrajectoryNetTransformer(nn.Module):
-    def __init__(self, num_classes, num_transformer_layers, trajectory_hidden_size, trajectory_rep_dim, sigmoid=True):
+    def __init__(self, obs_size, horizon, num_transformer_layers, trajectory_hidden_size, trajectory_rep_dim, sigmoid=True):
         super().__init__()
-        self.positional_encoder = PositionalEncoder(25*num_classes)
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=25*num_classes, nhead=10, dim_feedforward=trajectory_hidden_size, batch_first=True)
+        self.positional_encoder = PositionalEncoder(obs_size, max_seq_len=horizon+1) # not sure why this is +1 but we'll go with what we had
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=obs_size, nhead=10, dim_feedforward=trajectory_hidden_size, batch_first=True)
         self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=num_transformer_layers)
-        self.linear1 = nn.Linear(25*num_classes, 50)
+        self.linear1 = nn.Linear(obs_size, 50)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(50, trajectory_rep_dim)
         self.sigmoid = nn.Sigmoid() if sigmoid else nn.Identity()
-        self.num_classes = num_classes
+        self.obs_size = obs_size
+        self.horizon = horizon
 
     def forward(self, states):
         x = self.positional_encoder(states)
         x = self.transformer(x)
-        assert(x.shape[1] == 150)
-        assert(x.shape[2] == 25*self.num_classes)
+        assert(x.shape[1] == self.horizon)
+        assert(x.shape[2] == self.obs_size)
         x = torch.mean(x, dim=1)
         x = self.linear1(x)
         x = self.relu(x)
@@ -143,9 +150,9 @@ class TrajectoryNetTransformer(nn.Module):
         return x
     
 class TrajectoryNetLSTM(nn.Module):
-    def __init__(self, num_classes, num_lstm_layers):
+    def __init__(self, obs_size, num_lstm_layers):
         super().__init__()
-        self.lstm = nn.LSTM(25*num_classes, 2048, num_lstm_layers, batch_first=True)
+        self.lstm = nn.LSTM(25*obs_size, 2048, num_lstm_layers, batch_first=True)
         self.linear1 = nn.Linear(2048, 16)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(16, 3)
@@ -174,10 +181,10 @@ class RewardNet(nn.Module):
         return x.squeeze()
     
 class StateNet(nn.Module):
-    def __init__(self, state_rep_dim, hidden_size, num_layers, num_classes):
+    def __init__(self, state_rep_dim, hidden_size, num_layers, obs_size):
         super().__init__()
         modules = []
-        modules.append(nn.Linear(25*num_classes, hidden_size))
+        modules.append(nn.Linear(obs_size, hidden_size))
         for i in range(num_layers-1):
             modules.append(nn.Linear(hidden_size, hidden_size))
             modules.append(nn.LeakyReLU())
@@ -193,7 +200,8 @@ class NonLinearNet(nn.Module):
                  state_hidden_size, 
                  reward_hidden_size, 
                  trajectory_hidden_size,
-                 num_classes, 
+                 obs_size, 
+                 horizon,
                  num_trajectory_layers, 
                  num_state_layers, 
                  mlp=False, 
@@ -206,12 +214,13 @@ class NonLinearNet(nn.Module):
         assert trajectory_rep_dim == state_rep_dim, "Non-matching rep dims not yet implemented!"
         assert not repeat_trajectory_calculations, "Really shouldn't be repeating calculations"
         if lstm:
-            self.trajectory_encoder = TrajectoryNetLSTM(num_classes, num_trajectory_layers)
+            self.trajectory_encoder = TrajectoryNetLSTM(obs_size, num_trajectory_layers)
         else:
-            self.trajectory_encoder = TrajectoryNetTransformer(num_classes, num_trajectory_layers, trajectory_hidden_size, trajectory_rep_dim, trajectory_sigmoid)
+            self.trajectory_encoder = TrajectoryNetTransformer(obs_size, horizon, num_trajectory_layers, trajectory_hidden_size, trajectory_rep_dim, trajectory_sigmoid)
         # self.trajectory_encoder = SITrajectoryNet()
-        self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_state_layers, num_classes)
+        self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_state_layers, obs_size)
         self.mlp = mlp
+        self.horizon = horizon
         if repeat_trajectory_calculations:
             self.forward = self.forward_repeat
         else:
@@ -238,7 +247,6 @@ class NonLinearNet(nn.Module):
             reward = self.reward_layer(trajectory_rep, state_rep)
         else:
             reward = torch.einsum('bs,bs->b', trajectory_rep, state_rep)
-        # breakpoint()
         return reward
     
     def forward_no_repeat(self, trajectories, weights=None):
@@ -251,26 +259,27 @@ class NonLinearNet(nn.Module):
         if not self.ground_truth_phi:
             state_rep = self.state_encoder(states) # (bsize*L, rep_dim)
         else:
-            # breakpoint()
             states_unflattened = states.view(-1, 25, 4)
             inv_distances_unsqueezed = self.inv_distances.unsqueeze(0).unsqueeze(-1)
             inv_distances_expanded = inv_distances_unsqueezed.expand(states.shape[0], -1, 4)
             state_rep_with_empties = torch.einsum('bst, bst -> bt', states_unflattened, inv_distances_expanded) # Multiply everything then sum across the 25 squares (s)
             state_rep = state_rep_with_empties[:, :3]
-        trajectory_rep_expanded = trajectory_rep.unsqueeze(1).expand(-1, 150, -1) # (bsize, L, rep_dim)
+        trajectory_rep_expanded = trajectory_rep.unsqueeze(1).expand(-1, self.horizon, -1) # (bsize, L, rep_dim)
         trajectory_rep_flattened = trajectory_rep_expanded.reshape(-1, trajectory_rep_expanded.shape[-1]) # (bsize*L, rep_dim)
         if self.mlp:
             reward = self.reward_layer(trajectory_rep_flattened, state_rep)
         else:
             reward = torch.einsum('bs,bs->b', trajectory_rep_flattened, state_rep)
-        # breakpoint()
         return reward.view(trajectories.shape[0], -1)
     
 class NonlinearDataset(torch.utils.data.Dataset):
     def __init__(self, states, rewards, weights, num_classes=4):
-        self.states = torch.Tensor(states).to(torch.int64) #(n_examples, L, S); might need to be float
         self.rewards = torch.Tensor(rewards).to(torch.float) #(n_examples, L)
-        self.states = F.one_hot(self.states, num_classes=num_classes).view(-1, 150, 25*num_classes)
+        if num_classes == 0: # Indicates continuous environment, i.e. rings (at the moment)
+            self.states = torch.Tensor(states).to(torch.float) #(n_examples, L, S);
+        else: # Discrete environment
+            self.states = torch.Tensor(states).to(torch.int64) #(n_examples, L, S); might need to be float
+            self.states = F.one_hot(self.states, num_classes=num_classes).view(-1, 150, 25*num_classes)
         self.weights = weights # usually None
         if weights is not None:
             self.weights = torch.Tensor(weights).to(torch.float)
@@ -287,39 +296,52 @@ class NonlinearDataset(torch.utils.data.Dataset):
 def get_splits(args):
     prefix = "data/"
     prefix += "shuffled_" if args.use_shuffled else ""
-    if args.space_invaders:
-        state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
-        reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
-        assert not args.ground_truth_weights, "not implemented yet"
+    state_path = prefix + args.data_prefix + "_states.npy"
+    reward_path = prefix + args.data_prefix + "_rewards.npy"
+    # if args.space_invaders:
+    #     state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
+    #     reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
+    #     assert not args.ground_truth_weights, "not implemented yet"
+    # else:
+    #     state_file = prefix + f"states_{args.num_examples}.npy"
+    #     reward_file = prefix + f"rewards_{args.num_examples}.npy"
+    states = np.load(state_path, allow_pickle=True)
+    rewards = np.load(reward_path, allow_pickle=True)
+    if len(states.shape) == 3:
+        # Data is long-form, i.e. not already grouped by task; group by task first
+        assert args.num_examples % NUM_TRAJ_PER_REWARD == 0
+        num_rewards = args.num_examples // NUM_TRAJ_PER_REWARD
+        states_by_reward = np.reshape(states, (num_rewards, -1, states.shape[-2], states.shape[-1]))
+        rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))    
     else:
-        state_file = prefix + f"states_{args.num_examples}.npy"
-        reward_file = prefix + f"rewards_{args.num_examples}.npy"
-    states = np.load(state_file, allow_pickle=True)
-    rewards = np.load(reward_file, allow_pickle=True)
-    assert args.num_examples % NUM_TRAJ_PER_REWARD == 0
-    num_rewards = args.num_examples // NUM_TRAJ_PER_REWARD
-    train_length = int(num_rewards*0.8)
-    val_length = num_rewards - train_length
+        states_by_reward = states
+        rewards_by_reward = rewards
+        num_rewards = len(states_by_reward)
+    
+    # XXX pretty sure this isn't correct right now
+    # if args.permute_types:
+    #     for i in range(num_rewards):
+    #         permutation = np.arange(3, 6) if args.space_invaders else np.arange(1, 4)
+    #         rng.shuffle(permutation)
+    #         base_classes = np.arange(3 if args.space_invaders else 1)
+    #         assert not args.space_invaders, "I think the next line is wrong order here"
+    #         permutations_plus = np.concatenate((permutation, base_classes))
+    #         states_by_reward[i] = permutations_plus[states_by_reward[i]]
+    
+    # Create train/val split by creating list of task indices, shuffling, and then indexing
     reward_idx_list = np.arange(num_rewards)
     rng.shuffle(reward_idx_list)
-    states_by_reward = np.reshape(states, (num_rewards, -1, states.shape[-2], states.shape[-1]))
-    rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))
-    if args.permute_types:
-        for i in range(num_rewards):
-            permutation = np.arange(3, 6) if args.space_invaders else np.arange(1, 4)
-            rng.shuffle(permutation)
-            base_classes = np.arange(3 if args.space_invaders else 1)
-            assert not args.space_invaders, "I think the next line is wrong order here"
-            permutations_plus = np.concatenate((permutation, base_classes))
-            states_by_reward[i] = permutations_plus[states_by_reward[i]]
+    train_length = int(num_rewards*0.8)
+    val_length = num_rewards - train_length
     train_idxs = reward_idx_list[:train_length]
     val_idxs = reward_idx_list[train_length:]
     train_states = states_by_reward[train_idxs]
     train_rewards = rewards_by_reward[train_idxs]
-    train_states_flattened = np.reshape(train_states, (-1, train_states.shape[-2], train_states.shape[-1]))
-    train_rewards_flattened = np.reshape(train_rewards, (-1, train_rewards.shape[-1]))
     val_states = states_by_reward[val_idxs]
     val_rewards = rewards_by_reward[val_idxs]
+    # Flatten for final dataloader (can change this eventually if we want to train in pairs or more)
+    train_states_flattened = np.reshape(train_states, (-1, train_states.shape[-2], train_states.shape[-1]))
+    train_rewards_flattened = np.reshape(train_rewards, (-1, train_rewards.shape[-1]))
     val_states_flattened = np.reshape(val_states, (-1, val_states.shape[-2], val_states.shape[-1]))
     val_rewards_flattened = np.reshape(val_rewards, (-1, val_rewards.shape[-1]))
     
@@ -327,14 +349,23 @@ def get_splits(args):
         weights_file = prefix + f"weights_{args.num_examples}.npy"
         weights = np.load(weights_file, allow_pickle=True)
         weights_by_reward = np.reshape(weights, (num_rewards, -1, weights.shape[-1]))
-        train_weights = weights_by_reward[train_idxs]    
+        train_weights = weights_by_reward[train_idxs]
         train_weights_flattened = np.reshape(train_weights, (-1, train_weights.shape[-1]))
         val_weights = weights_by_reward[val_idxs]
         val_weights_flattened = np.reshape(val_weights, (-1, val_weights.shape[-1]))
     else:
         train_weights_flattened, val_weights_flattened = None, None
-    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened, train_weights_flattened, 6 if args.space_invaders else 4)
-    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, val_weights_flattened, 6 if args.space_invaders else 4)
+    
+    if "grid" in args.env:
+        num_classes = 4
+    elif "space" in args.env:
+        num_classes = 6
+    elif "ring" in args.env or "object" in env:
+        num_classes = 0 # Indicates continuous env
+    else:
+        raise NotImplementedError
+    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened, train_weights_flattened, num_classes)
+    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, val_weights_flattened, num_classes)
     
     # training_data, validation_data = random_split(dataset, [train_length, val_length])
     # print("Num training", len(training_data))
@@ -368,18 +399,29 @@ def train(args):
     
     # torch.cuda.set_device(f'cuda:{FREEST_GPU}')
 
-    num_classes = 6 if args.space_invaders else 4
+    if "grid" in args.env:
+        obs_size = 4*25
+        horizon = 150
+    elif "space" in args.env:
+        obs_size = 6*25
+        horizon = 150
+    elif "ring" in args.env or "object" in env:
+        obs_size = 2*args.num_rings
+        horizon = 50
+    else:
+        raise NotImplementedError
 
     net = NonLinearNet(args.trajectory_rep_dim, 
                        args.state_rep_dim, 
                        args.state_hidden_size, 
                        64, 
                        args.trajectory_hidden_size, 
-                       num_classes, 
+                       obs_size, 
+                       horizon,
                        args.num_trajectory_layers, 
                        args.num_state_layers, 
                        mlp=args.mlp, 
-                       trajectory_sigmoid=not args.no_trajectory_sigmoid, 
+                       trajectory_sigmoid=args.trajectory_sigmoid, 
                        lstm=args.lstm, 
                        repeat_trajectory_calculations=args.repeat_trajectory_calculations, 
                        ground_truth_phi = args.ground_truth_phi).cuda()
@@ -404,43 +446,40 @@ def train(args):
             for states_batch, rewards_batch, weights_batch in tepoch:
                 # if torch.any(torch.all(weights_batch < 0, axis=1)):
                     # breakpoint()
-                # states_batch: (bsize, 150, 100)
-                # rewards_batch: (bsize, 150)
+                # states_batch: (bsize, horizon, obs_size)
+                # rewards_batch: (bsize, horizon)
                 tepoch.set_description(f"Epoch {epoch}")
                 # In effect, we now batch by batch *and* t
                 if not args.evaluate:
                     optimizer.zero_grad()
                 if not args.repeat_trajectory_calculations:
                     if args.ground_truth_weights:
-                        # breakpoint()
-                        # print(rewards_batch[-1])
                         prediction = net.forward(states_batch, weights_batch)
                     else:
                         prediction = net.forward(states_batch)
                 else:
-                    trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
-                    trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
-                    states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
+                    trajectory_batch = states_batch.unsqueeze(1).expand(-1, horizon, horizon, obs_size) #repeat trajectory horizon times
+                    trajectory_batch = trajectory_batch.reshape(-1, horizon, obs_size) # return to batch form: (bsize*L, L, obs_size)
+                    states_batch = states_batch.view(-1, obs_size) # (bsize*L, obs_size)
                     rewards_batch = rewards_batch.view(-1) # bsize * L
                     prediction = net.forward(trajectory_batch, states_batch)
                 loss = loss_func(prediction, rewards_batch)
                 wandb.log({'train loss': loss})
                 # loss.backward()
                 if args.verbose and tepoch.n % 100 == 0:
-                    print(prediction)
-                    print(rewards_batch)
-                    print(torch.max((prediction-rewards_batch)**2))
+                    print("Predicted vs actual rewards: \n", np.array(list(zip(prediction.cpu().detach().numpy(), rewards_batch.cpu().detach().numpy()))))
+                    print("Maximum error: \n", torch.max((prediction-rewards_batch)**2))
                     worst = torch.argmax((prediction-rewards_batch)**2)
-                    print(prediction.flatten()[worst], rewards_batch.flatten()[worst])
-                    print(net.trajectory_encoder(states_batch))
+                    print("Argmax of error: \n", prediction.flatten()[worst], rewards_batch.flatten()[worst])
+                    print("Trajectory reps: \n", net.trajectory_encoder(states_batch))
                     # for name, param in net.named_parameters():
                     #     if param.grad is not None:
                     #         grad = torch.max(param.grad)
                     #     else:
                     #         grad = None
                     #     print(name, param, grad)
-                avg_loss += loss.item() * args.batch_size * 150
-                n_samples += args.batch_size * 150
+                avg_loss += loss.item() * args.batch_size * horizon
+                n_samples += args.batch_size * horizon
                 if not args.evaluate:
                     loss.backward()
                     optimizer.step()
@@ -455,7 +494,7 @@ def train(args):
                         
                 tepoch.set_postfix({"avg loss": avg_loss/n_samples})
 
-        avg_loss /= len(train_dataloader)*150*args.batch_size
+        avg_loss /= len(train_dataloader)*horizon*args.batch_size
         #n_correct /= (3 * len(training))
 
         # UNCOMMENT TO SAVE MODEL
@@ -471,8 +510,8 @@ def train(args):
         with torch.no_grad():
             with tqdm(validation_dataloader, unit="batch") as tepoch:
                 for states_batch, rewards_batch, weights_batch in tepoch:
-                    # states_batch: (bsize, 150, 100)
-                    # rewards_batch: (bsize, 150)
+                    # states_batch: (bsize, horizon, 100)
+                    # rewards_batch: (bsize, horizon)
                     tepoch.set_description("Epoch {epoch} (validation)")
                     # In effect, we now batch by batch *and* t
                     if not args.repeat_trajectory_calculations:
@@ -481,16 +520,16 @@ def train(args):
                         else:
                             prediction = net.forward(states_batch)
                     else:
-                        trajectory_batch = states_batch.unsqueeze(1).expand(-1, 150, 150, 25*num_classes) #repeat trajectory 150 times
-                        trajectory_batch = trajectory_batch.reshape(-1, 150, 25*num_classes) # return to batch form: (bsize*L, L, 100)
+                        trajectory_batch = states_batch.unsqueeze(1).expand(-1, horizon, horizon, 25*num_classes) #repeat trajectory horizon times
+                        trajectory_batch = trajectory_batch.reshape(-1, horizon, 25*num_classes) # return to batch form: (bsize*L, L, 100)
                         states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
                         rewards_batch = rewards_batch.view(-1) # bsize * L
                         prediction = net.forward(trajectory_batch, states_batch)
                     loss = loss_func(prediction, rewards_batch)
-                    avg_loss += loss.item() * args.batch_size * 150
-                    n_samples += args.batch_size*150
+                    avg_loss += loss.item() * args.batch_size * horizon
+                    n_samples += args.batch_size*horizon
                     tepoch.set_postfix({"avg validation loss": avg_loss/n_samples})
-        avg_loss /= len(validation_dataloader)*150*args.batch_size
+        avg_loss /= len(validation_dataloader)*horizon*args.batch_size
         wandb.log({'average validation loss': avg_loss})
     if not args.evaluate:
         torch.save(net.state_dict(), args.save_to)
