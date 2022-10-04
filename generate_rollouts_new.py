@@ -125,7 +125,8 @@ ray.init(num_cpus=n_threads)
 print(ray.available_resources())
 print(psutil.cpu_count())
 models = os.listdir(args.model_dir)
-print(f"Found {len(models)} models")
+print(f"Found {len(models)} agents")
+print("Using agents starting from the end in the hope that the model didn't train on them")
 num_models = len(models) if args.num_models == 0 else args.num_models
 outs = ray.get([get_examples_regression.remote(args.model_dir, 
                                                model_name, 
@@ -136,7 +137,7 @@ outs = ray.get([get_examples_regression.remote(args.model_dir,
                                                args.chai_rollouts, 
                                                args.num_rings, 
                                                args.single_move, 
-                                               args.process_data) for model_name in models[:num_models]])
+                                               args.process_data) for model_name in models[-num_models:]])
 
 if args.chai_rollouts:
     rollouts = [ex[0] for ex in outs]
