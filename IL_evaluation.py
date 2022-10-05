@@ -19,11 +19,13 @@ from imitation.util.networks import RunningNorm
 import torch
 import torch.nn.functional as F
 from new_block_env_new import NewBlockEnv
+from object_env import ObjectEnv
 import ray
 import wandb
 
 NUM_AGENTS_PER_GPU = 10
-NUM_ROLLOUTS_PER_AGENT = 10000
+MAX_MODEL_BATCH = 256
+rng = np.random.default_rng()
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train supervised IRL models')
@@ -32,43 +34,52 @@ def parse_args():
     parser.add_argument('--weights', type=str, default='weights_chai_100000.npy')
     parser.add_argument('--model', '-sm', type=str, default='ground_truth_phi_test.parameters', help='location of saved model to load')
     parser.add_argument('--verbose', '-v', action='store_true')
-    parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
-    parser.add_argument('--max-threads', '-mt', default=50, type=int)
+    parser.add_argument('--wandb-project', '-wp', type=str, default='sirl_evaluation')
+    parser.add_argument('--max-threads', '-mt', default=10, type=int)
     parser.add_argument('--average-traj-reps', '-atr', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--env', default='rings', type=str)
+    parser.add_argument('--agent-directory', default='ring_agents', type=str)
+    parser.add_argument('--num-rings', default=5, type=int, help="Only for ring env")
+    parser.add_argument('--single-move', action=argparse.BooleanOptionalAction, help="Only for ring env")
+    parser.add_argument('--num-rollouts-per-agent', default=10000, type=int)
+    parser.add_argument('--rl-its', default=400000, type=int, help="Number of iterations to run reinforcement learning")
+    parser.add_argument('--il-its', default=1000000, type=int, help="Number of iterations to run other imitation algs")
     args = parser.parse_args()
     return args
 
-@ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
+# @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
+@ray.remote
 def evaluate_random(env):
-    model = stable_baselines3.PPO("MlpPolicy", env, verbose=1)
-    mean_random_ret, _ = evaluate_policy(model, env, n_eval_episodes=100)
-    return mean_random_ret
-
-@ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
-def evaluate_random_rew(env, model_name):
-    print("USING models_regression BY DEFAULT")
-    model = stable_baselines3.PPO.load("models_regression" + "/" + model_name, env)
-    mean_random_ret, _ = evaluate_policy(model, env, n_eval_episodes=100)
-    return mean_random_ret
-
-@ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
-def evaluate_ground_truth(env):
     agent = stable_baselines3.PPO("MlpPolicy", env, verbose=1)
-    agent.learn(total_timesteps=100000)
+    mean_random_ret, _ = evaluate_policy(agent, env, n_eval_episodes=100)
+    return mean_random_ret
+
+# @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
+@ray.remote
+def evaluate_random_rew(env, agent_name):
+    agent = stable_baselines3.PPO.load(agent_name, env)
+    mean_random_ret, _ = evaluate_policy(agent, env, n_eval_episodes=100)
+    return mean_random_ret
+
+# @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
+@ray.remote
+def evaluate_ground_truth(env, rl_its):
+    agent = stable_baselines3.PPO("MlpPolicy", env, verbose=1, device='cpu')
+    agent.learn(total_timesteps=rl_its)
     mean_ground_truth_ret, _ = evaluate_policy(agent, env, n_eval_episodes=100)
     return mean_ground_truth_ret
 
-@ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
-def evaluate_sirl(traj_rep, state_encoder, env):
-    pred_env = NewBlockEnv(traj_rep, state_encoder)
-    pred_model = stable_baselines3.PPO("MlpPolicy", pred_env, verbose=1)
-    pred_model.learn(total_timesteps=100000)
-    mean_ground_truth_pred_model_ret, _ = evaluate_policy(pred_model, env, n_eval_episodes=100)
-    return mean_ground_truth_pred_model_ret
+# @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
+@ray.remote
+def evaluate_sirl(pred_env, ground_truth_env, rl_its):
+    pred_agent = stable_baselines3.PPO("MlpPolicy", pred_env, verbose=1, device='cpu')
+    pred_agent.learn(total_timesteps=rl_its)
+    mean_ground_truth_pred_agent_ret, _ = evaluate_policy(pred_agent, ground_truth_env, n_eval_episodes=100)
+    return mean_ground_truth_pred_agent_ret
 
-@ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
-def evaluate_adversarial(rollouts, env, alg):
+# @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
+@ray.remote
+def evaluate_adversarial(rollouts, env, alg, il_its):
     trainer = GAIL if alg == 'gail' else AIRL
     
     venv = DummyVecEnv([lambda: env] * 8)
@@ -80,6 +91,7 @@ def evaluate_adversarial(rollouts, env, alg):
         ent_coef=0.0,
         learning_rate=0.0003,
         n_epochs=10,
+        device='cpu'
     )
     reward_net = BasicRewardNet(
         venv.observation_space, venv.action_space, normalize_input_layer=RunningNorm
@@ -94,7 +106,7 @@ def evaluate_adversarial(rollouts, env, alg):
         reward_net=reward_net,
         allow_variable_horizon=True,
     )
-    adversarial_trainer.train(1000000)
+    adversarial_trainer.train(il_its)
     mean_ret, _ = evaluate_policy(learner, env, n_eval_episodes=1)
     return mean_ret
     
@@ -112,21 +124,27 @@ def load_model(location, obs_size, horizon):
     repeat_trajectory_calculations = False
     ground_truth_phi = False
     
-    net = NonLinearNet(trajectory_rep_dim, state_rep_dim, state_hidden_size, 64, trajectory_hidden_size, obs_size, horizon, num_trajectory_layers, num_state_layers, mlp=mlp, trajectory_sigmoid=trajectory_sigmoid, lstm=lstm, repeat_trajectory_calculations=repeat_trajectory_calculations, ground_truth_phi = ground_truth_phi).cuda() # Maybe shouldn't make this cuda
+    net = NonLinearNet(trajectory_rep_dim, state_rep_dim, state_hidden_size, 64, trajectory_hidden_size, obs_size, horizon, num_trajectory_layers, num_state_layers, mlp=mlp, trajectory_sigmoid=trajectory_sigmoid, lstm=lstm, repeat_trajectory_calculations=repeat_trajectory_calculations, ground_truth_phi = ground_truth_phi)
+    # net = net.cuda() # Maybe shouldn't make this cuda
     net.load_state_dict(torch.load(location))
     return net
 
 def main(args):
     wandb.init(project=args.wandb_project)
     if "grid" in args.env:
+        raise NotImplementedError("You need to deal with obs_size in convert_chai_rollouts: it needs to be obs_size//num_classes)")
         obs_size = 4*25
         horizon = 150
+        dtype = int
     elif "space" in args.env:
+        raise NotImplementedError
         obs_size = 6*25
         horizon = 150
+        dtype = int
     elif "ring" in args.env or "object" in env:
         obs_size = 2*args.num_rings
         horizon = 50
+        dtype = float
     else:
         raise NotImplementedError
     model = load_model(args.model, obs_size, horizon)
@@ -135,46 +153,64 @@ def main(args):
     weights = np.load(f"data/{args.weights}")
     # weight_batches_redundant = weights.reshape(-1, 100, 3)
     # weight_batches = weight_batches_redundant[:, 0, :].squeeze()
-    print(weights.shape)
+    # print(weights.shape)
     rollouts = load(f"data/{args.data}")
-    states, _ = convert_chai_rollouts(rollouts)
-    rollout_batches = [rollouts[i:(i+NUM_ROLLOUTS_PER_AGENT)] for i in range(len(rollouts)//NUM_ROLLOUTS_PER_AGENT)]
-    state_batches_np = states.reshape(-1, NUM_ROLLOUTS_PER_AGENT, 150, 25)
-    state_batches_int = torch.Tensor(state_batches_np).to(torch.int64)
-    state_batches = F.one_hot(state_batches_int, num_classes=4).view(-1, NUM_ROLLOUTS_PER_AGENT, 150, 100).to(torch.float)
-    models_directory = "models_regression"
-    models = os.listdir(models_directory)
-    np.random.shuffle(models)
-    models = [models[i:(i+10)] for i in range(len(models)//10)]
-    ray.init(num_cpus=10, num_gpus=1)
-    for rollout_batch, traj_batch, weights, model_batch in zip(rollout_batches, state_batches, weights, models):
-        ground_truth_env = NewBlockEnv(weights)
+    states, _ = convert_chai_rollouts(rollouts, horizon, obs_size, dtype)
+    rollout_batches = [rollouts[i:(i+args.num_rollouts_per_agent)] for i in range(len(rollouts)//args.num_rollouts_per_agent)]
+    if "grid" in args.env or "space" in args.env:
+        state_batches_np = states.reshape(-1, args.num_rollouts_per_agent, 150, 25)
+        state_batches_int = torch.Tensor(state_batches_np).to(torch.int64)
+        state_batches = F.one_hot(state_batches_int, num_classes=4).view(-1, args.num_rollouts_per_agent, 150, 100).to(torch.float)
+    else:
+        state_batches = torch.Tensor(states.reshape(-1, args.num_rollouts_per_agent, horizon, obs_size))
+    # Get agents trained on random rewards to serve as baselines
+    agents = os.listdir(args.agent_directory)
+    agents_random = rng.permuted(agents)
+    agents_batched = [agents[i:(i+10)] for i in range(len(agents)//10)]
+    ray.init(num_cpus=10, num_gpus=0)
+    for rollout_batch, traj_batch, weights, agent_batch in zip(rollout_batches, state_batches, weights, agents_batched):
+        if "grid" in args.env:
+            ground_truth_env = NewBlockEnv(weights)
+        elif "ring" in args.env or "object" in env:
+            seed = rng.integers(10000)
+            ground_truth_env = ObjectEnv(weights, num_rings=args.num_rings, seed=seed, env_size=1, move_allowance=True, episode_len=50, min_block_dist=0.25, intersection=True, max_move_dist=0.1, block_thickness=2, single_move=args.single_move)
+        else:
+            raise NotImplementedError
         # Random agent
         # random_rets = ray.get([evaluate_random.remote(ground_truth_env) for i in range(100)])
         # ave_random_ret = np.mean(random_rets)
         
-        # Trained agent on random rewards
-        random_rew_rets = ray.get([evaluate_random_rew.remote(ground_truth_env, model_name) for model_name in model_batch])
+#         # Trained agent on random rewards
+        random_rew_rets = ray.get([evaluate_random_rew.remote(ground_truth_env, f"{args.agent_directory}/{agent_name}") for agent_name in agent_batch])
         ave_random_rew_ret = np.mean(random_rew_rets)
         
-        # Ground truth
-        ground_truth_rets = ray.get([evaluate_ground_truth.remote(ground_truth_env) for i in range(10)])
+#         # Ground truth
+        ground_truth_rets = ray.get([evaluate_ground_truth.remote(ground_truth_env, args.rl_its) for i in range(10)])
         ave_ground_truth_ret = np.mean(ground_truth_rets)
         
         # Our method
         if args.average_traj_reps:
-            traj_rep = trajectory_encoder(traj_batch[:256].cuda()).mean(axis=0).cpu().detach().numpy()
+            # traj_rep = trajectory_encoder(traj_batch[:MAX_MODEL_BATCH].cuda()).mean(axis=0).cpu().detach().numpy()
+            traj_rep = trajectory_encoder(traj_batch[:MAX_MODEL_BATCH]).mean(axis=0).detach().numpy()
         else:
-            traj_rep = trajectory_encoder(traj_batch[0].unsqueeze(0).cuda()).squeeze().cpu().detach().numpy()
-        sirl_rets = ray.get([evaluate_sirl.remote(traj_rep, state_encoder, ground_truth_env) for i in range(10)])
+            # traj_rep = trajectory_encoder(traj_batch[0].unsqueeze(0).cuda()).squeeze().cpu().detach().numpy()
+            traj_rep = trajectory_encoder(traj_batch[0].unsqueeze(0)).squeeze().detach().numpy()
+        if "grid" in args.env:
+            pred_env = NewBlockEnv(traj_rep, state_encoder)
+        elif "ring" in args.env or "object" in env:
+            seed = rng.integers(10000)
+            pred_env = ObjectEnv(traj_rep, state_encoder=state_encoder, num_rings=args.num_rings, seed=seed, env_size=1, move_allowance=True, episode_len=50, min_block_dist=0.25, intersection=True, max_move_dist=0.1, block_thickness=2, single_move=args.single_move)
+        else:
+            raise NotImplementedError
+        sirl_rets = ray.get([evaluate_sirl.remote(pred_env, ground_truth_env, args.rl_its) for i in range(10)])
         ave_sirl_ret = np.mean(sirl_rets)
         
         # GAIL
-        gail_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'gail') for i in range(10)])
+        gail_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'gail', args.il_its) for i in range(10)])
         ave_gail_ret = np.mean(gail_rets)
         
         # AIRL
-        airl_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'airl') for i in range(10)])
+        airl_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'airl', args.il_its) for i in range(10)])
         ave_airl_ret = np.mean(airl_rets)
         
         # wandb.log({'random_ret': ave_random_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})

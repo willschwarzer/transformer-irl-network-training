@@ -13,7 +13,7 @@ import jax
 import cv2 as cv
 import palettable
 from palettable.tableau import TableauLight_10, ColorBlind_10
-# import torch
+import torch
 # import torch.nn.functional as F
 
 REWARD_BOUND = 100 # To bound reward
@@ -21,14 +21,10 @@ IM_SIZE = 256
 BLOCK_SIZE = 8
 
 class ObjectEnv(gym.Env):
-    def __init__(self, object_rewards, state_rep_model=None, seed=0, env_size=10, num_rings=3, move_allowance=True, im_size=256, block_size=16, block_thickness=4, episode_len=150, max_move_dist=1, act_space_bounds=1e9, min_block_dist=0.01, intersection=False, manual_clipping=False, single_move=False):
+    def __init__(self, object_rewards, state_encoder=None, seed=0, env_size=10, num_rings=3, move_allowance=True, im_size=256, block_size=16, block_thickness=4, episode_len=150, max_move_dist=1, act_space_bounds=1e9, min_block_dist=0.01, intersection=False, manual_clipping=False, single_move=False):
         super().__init__()
-        assert(len(object_rewards) == (num_rings*(num_rings-1)//2))
-
-        # if state_rep is not None:
-        #     self.state_rep = state_rep
-        # else:
-        #     self.state_rep = self._get_dist_sums
+        if state_encoder is None: # Otherwise object_rewards is just the trajectory rep
+            assert(len(object_rewards) == (num_rings*(num_rings-1)//2))
         
         assert not manual_clipping, "I really don't think you want to do that"
         assert move_allowance, "Always using this now"
@@ -47,18 +43,17 @@ class ObjectEnv(gym.Env):
         self.manual_clipping = manual_clipping
         self.single_move = single_move
         self.palette = TableauLight_10.colors
+        self.state_encoder = state_encoder
         
         self.key = random.PRNGKey(seed)
         
         # Make a triangular-array-compatible weight vector to allow for efficient
         # computation later
-        tril = jnp.tril(jnp.ones([num_rings, num_rings]), k=-1) # Lower triangle of matrix, not including main diag
-        expanded_object_rewards = tril.at[jnp.nonzero(tril)].set(object_rewards)
+        if state_encoder is None:
+            tril = jnp.tril(jnp.ones([num_rings, num_rings]), k=-1) # Lower triangle of matrix, not including main diag
+            self.expanded_object_rewards = tril.at[jnp.nonzero(tril)].set(object_rewards)
         
         self.state_bounds = jnp.array([-env_size/2, env_size/2], dtype=float)
-        
-        self.expanded_object_rewards = expanded_object_rewards
-        self.state_rep_model = state_rep_model
         
         self.action_space = spaces.Box(low=-act_space_bounds, high=act_space_bounds, shape=(num_rings*2,))
         self.observation_space = spaces.Box(low=-env_size/2, high=env_size/2, shape=(num_rings, 2))
@@ -68,14 +63,14 @@ class ObjectEnv(gym.Env):
 
     def step(self, action, alt_reward=[0,0,0], render=False):
         action = jnp.array(action)
-        if self.state_rep_model is None:
+        if self.state_encoder is None:
             # breakpoint()
             self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds, self.move_allowance*self.max_move_dist, self.min_block_dist, self.intersection, self.manual_clipping, self.single_move)
             # self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds)
         else:
-            raise NotImplementedError("Nope")
-            self.state = _next_state(self.state, action, self.state_bounds)
-            state_rep = state_rep_model(self.state)
+            self.state = _next_state(self.state, action, self.state_bounds, self.move_allowance, self.single_move)
+            state_rep = self.state_encoder(torch.Tensor(np.asarray(jnp.reshape(self.state, (-1,)))))
+            reward = np.dot(state_rep.detach().cpu().numpy(), self.object_rewards)
 
         self.nsteps += 1
         done = self.nsteps > self.episode_len
@@ -153,7 +148,7 @@ class ObjectEnv(gym.Env):
         return im
             
 
-@partial(jit, static_argnums=(1, 2))
+@partial(jit, static_argnums=(1, 2), backend='cpu')
 def _init_state(key, num_rings, env_size):
     key, subkey = random.split(key)
     state = random.uniform(subkey, shape=(num_rings, 2), minval=-env_size/2, maxval=env_size/2)
