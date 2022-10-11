@@ -44,42 +44,45 @@ def parse_args():
     parser.add_argument('--num-rollouts-per-agent', default=10000, type=int)
     parser.add_argument('--rl-its', default=400000, type=int, help="Number of iterations to run reinforcement learning")
     parser.add_argument('--il-its', default=1000000, type=int, help="Number of iterations to run other imitation algs")
+    parser.add_argument('--num-eval-episodes', default=100, type=int, help="Number of episodes to evaluate on")
+    parser.add_argument('--num-random-agents', default=10, type=int)
+    parser.add_argument('--percentile-evaluation', default=False, action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
     return args
 
 # @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
 @ray.remote
-def evaluate_random(env):
+def evaluate_random(env, num_eval_episodes):
     agent = stable_baselines3.PPO("MlpPolicy", env, verbose=1)
-    mean_random_ret, _ = evaluate_policy(agent, env, n_eval_episodes=100)
+    mean_random_ret, _ = evaluate_policy(agent, env, n_eval_episodes=num_eval_episodes)
     return mean_random_ret
 
 # @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
 @ray.remote
-def evaluate_random_rew(env, agent_name):
+def evaluate_random_rew(env, agent_name, num_eval_episodes):
     agent = stable_baselines3.PPO.load(agent_name, env)
-    mean_random_ret, _ = evaluate_policy(agent, env, n_eval_episodes=100)
+    mean_random_ret, _ = evaluate_policy(agent, env, n_eval_episodes=num_eval_episodes)
     return mean_random_ret
 
 # @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
 @ray.remote
-def evaluate_ground_truth(env, rl_its):
+def evaluate_ground_truth(env, rl_its, num_eval_episodes):
     agent = stable_baselines3.PPO("MlpPolicy", env, verbose=1, device='cpu')
     agent.learn(total_timesteps=rl_its)
-    mean_ground_truth_ret, _ = evaluate_policy(agent, env, n_eval_episodes=100)
+    mean_ground_truth_ret, _ = evaluate_policy(agent, env, n_eval_episodes=num_eval_episodes)
     return mean_ground_truth_ret
 
 # @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
 @ray.remote
-def evaluate_sirl(pred_env, ground_truth_env, rl_its):
+def evaluate_sirl(pred_env, ground_truth_env, rl_its, num_eval_episodes):
     pred_agent = stable_baselines3.PPO("MlpPolicy", pred_env, verbose=1, device='cpu')
     pred_agent.learn(total_timesteps=rl_its)
-    mean_ground_truth_pred_agent_ret, _ = evaluate_policy(pred_agent, ground_truth_env, n_eval_episodes=100)
+    mean_ground_truth_pred_agent_ret, _ = evaluate_policy(pred_agent, ground_truth_env, n_eval_episodes=num_eval_episodes)
     return mean_ground_truth_pred_agent_ret
 
 # @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))
 @ray.remote
-def evaluate_adversarial(rollouts, env, alg, il_its):
+def evaluate_adversarial(rollouts, env, alg, num_eval_episodes):
     trainer = GAIL if alg == 'gail' else AIRL
     
     venv = DummyVecEnv([lambda: env] * 8)
@@ -107,7 +110,46 @@ def evaluate_adversarial(rollouts, env, alg, il_its):
         allow_variable_horizon=True,
     )
     adversarial_trainer.train(il_its)
-    mean_ret, _ = evaluate_policy(learner, env, n_eval_episodes=1)
+    mean_ret, _ = evaluate_policy(learner, env, n_eval_episodes=num_eval_episodes)
+    return mean_ret
+
+@ray.remote
+def evaluate_bc(rollouts, env, il_its, num_eval_episodes):
+    
+    # venv = DummyVecEnv([lambda: env] * 8)
+    
+    # learner = stable_baselines3.PPO(
+    #     env=venv,
+    #     policy='MlpPolicy',
+    #     batch_size=64,
+    #     ent_coef=0.0,
+    #     learning_rate=0.0003,
+    #     n_epochs=10,
+    #     device='cpu'
+    # )
+    # reward_net = BasicRewardNet(
+    #     venv.observation_space, venv.action_space, normalize_input_layer=RunningNorm
+    # )
+    
+    bc_trainer = bc.BC(
+    observation_space=env.observation_space,
+    action_space=env.action_space,
+    demonstrations=rollouts,
+    rng=rng,
+)
+    
+    # adversarial_trainer = trainer(
+    #     demonstrations=rollouts,
+    #     demo_batch_size=1024,
+    #     gen_replay_buffer_capacity=2048,
+    #     n_disc_updates_per_round=4,
+    #     venv=venv,
+    #     gen_algo=learner,
+    #     reward_net=reward_net,
+    #     allow_variable_horizon=True,
+    # )
+    bc_trainer.train(il_its)
+    mean_ret, _ = evaluate_policy(learner, env, n_eval_episodes=num_eval_episodes)
     return mean_ret
     
 
@@ -166,9 +208,9 @@ def main(args):
     # Get agents trained on random rewards to serve as baselines
     agents = os.listdir(args.agent_directory)
     agents_random = rng.permuted(agents)
-    agents_batched = [agents[i:(i+10)] for i in range(len(agents)//10)]
+    agents = agents_random[:args.num_random_agents]
     ray.init(num_cpus=10, num_gpus=0)
-    for rollout_batch, traj_batch, weights, agent_batch in zip(rollout_batches, state_batches, weights, agents_batched):
+    for rollout_batch, traj_batch, weights in zip(rollout_batches, state_batches, weights):
         if "grid" in args.env:
             ground_truth_env = NewBlockEnv(weights)
         elif "ring" in args.env or "object" in env:
@@ -181,11 +223,11 @@ def main(args):
         # ave_random_ret = np.mean(random_rets)
         
 #         # Trained agent on random rewards
-        random_rew_rets = ray.get([evaluate_random_rew.remote(ground_truth_env, f"{args.agent_directory}/{agent_name}") for agent_name in agent_batch])
+        random_rew_rets = ray.get([evaluate_random_rew.remote(ground_truth_env, f"{args.agent_directory}/{agent_name}", args.num_eval_its) for agent_name in agents])
         ave_random_rew_ret = np.mean(random_rew_rets)
         
 #         # Ground truth
-        ground_truth_rets = ray.get([evaluate_ground_truth.remote(ground_truth_env, args.rl_its) for i in range(10)])
+        ground_truth_rets = ray.get([evaluate_ground_truth.remote(ground_truth_env, args.rl_its, args.num_eval_its) for i in range(10)])
         ave_ground_truth_ret = np.mean(ground_truth_rets)
         
         # Our method
@@ -202,19 +244,31 @@ def main(args):
             pred_env = ObjectEnv(traj_rep, state_encoder=state_encoder, num_rings=args.num_rings, seed=seed, env_size=1, move_allowance=True, episode_len=50, min_block_dist=0.25, intersection=True, max_move_dist=0.1, block_thickness=2, single_move=args.single_move)
         else:
             raise NotImplementedError
-        sirl_rets = ray.get([evaluate_sirl.remote(pred_env, ground_truth_env, args.rl_its) for i in range(10)])
+        sirl_rets = ray.get([evaluate_sirl.remote(pred_env, ground_truth_env, args.rl_its, args.num_eval_its) for i in range(10)])
         ave_sirl_ret = np.mean(sirl_rets)
         
         # GAIL
-        gail_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'gail', args.il_its) for i in range(10)])
+        gail_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'gail', args.il_its, args.num_eval_its) for i in range(10)])
         ave_gail_ret = np.mean(gail_rets)
         
         # AIRL
-        airl_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'airl', args.il_its) for i in range(10)])
+        airl_rets = ray.get([evaluate_adversarial.remote(rollout_batch, ground_truth_env, 'airl', args.il_its, args.num_eval_its) for i in range(10)])
         ave_airl_ret = np.mean(airl_rets)
         
-        # wandb.log({'random_ret': ave_random_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})
-        wandb.log({'random_rew_ret': ave_random_rew_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})
+        bc_rets = ray.get([evaluate_bc.remote(rollout_batch, ground_truth_env, args.il_its, args.num_eval_its) for i in range(10)])
+        ave_bc_ret = np.mean(bc_rets)
+        
+        if args.percentile_evaluation:
+            random_rets_sorted = np.sort(random_rew_rets)
+            ground_truth_percentiles = np.digitize(ground_truth_rets, random_rets_sorted)
+            sirl_percentiles = np.digitize(ground_truth_rets, random_rets_sorted)
+            gail_percentiles = np.digitize(gail_rets, random_rets_sorted)
+            airl_percentiles = np.digitize(airl_rets, random_rets_sorted)
+            bc_percentiles = np.digitize(bc_rets, random_rets_sorted)]
+            wandb.log({'random_rew_ret': ave_random_rew_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret, 'bc_ret': ave_bc_ret, 'ground_truth_percentiles': ground_truth_percentiles, 'sirl_percentiles': sirl_percentiles, 'gail_percentiles': gail_percentiles, 'airl_percentiles})
+        else:
+            # wandb.log({'random_ret': ave_random_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})
+            wandb.log({'random_rew_ret': ave_random_rew_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret, 'bc_ret': ave_bc_ret})
 
 if __name__ == "__main__":
     args = parse_args()
