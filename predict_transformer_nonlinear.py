@@ -62,6 +62,10 @@ def parse_args():
     # parser.add_argument('--reward-batches', '-rb', default=False, action=argparse.BooleanOptionalAction)
     # XXX what is reward batches for?
     parser.add_argument('--data-prefix', '-dp', type=str, default="rings_multimove")
+    parser.add_argument('--iid-traj', '-it', default=False, action=store_true, help="Don't do batching by task")
+    parser.add_argument('--n', '-n', default=1, type=int, help="How many trajectories to train on (if iid traj, must be 1)")
+    parser.add_argument('--rand-n', '-rn', default=False, action=argparse.BooleanOptionalAction, help="Train on a random number of trajectories within each task and epoch")
+    parser.add_argument('--num-states', '-ns', type=int, help="Number of iid states to predict rewards of per task (defaults to all)")
     args = parser.parse_args()
     args.num_epochs = args.num_epochs if not args.evaluate else 1
     
@@ -292,6 +296,48 @@ class NonlinearDataset(torch.utils.data.Dataset):
             return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), self.weights[index].cuda() # returns a whole (L, S), (L, 1) trajectory
         else:
             return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), 0 # 0 here is in effect None, just not allowed to use None
+
+# Dataset for data organized by task (i.e. reward)
+# Allows for us to do n-shot, as well as using iid states separate from the
+# demonstration trajectory for inference
+# Currently only implemented for rings
+class TaskDataset(torch.utils.data.Dataset):
+        def __init__(self, states, rewards, weights, n=1, rand_n=False, num_states=None):
+        self.rewards = torch.Tensor(rewards).to(torch.float) #(n_tasks, n_examples, L)
+        self.states = torch.Tensor(states).to(torch.float) #(n_tasks, n_examples, L, S)
+        self.weights = weights # usually None
+        self.n = n
+        self.rand_n = rand_n # if true, uses self.n as max n
+        if num_states is None:
+            self.num_states = self.states.shape[1]*self.states.shape[2] # e.g. 100*T
+        else:
+            self.num_states = num_states
+        if weights is not None:
+            self.weights = torch.Tensor(weights).to(torch.float)
+        
+    def __len__(self):
+        return len(self.states)
+    
+    def __getitem__(self, index):
+        trajs = self.states[index]
+        rewards = self.rewards[index]
+        if self.rand_n:
+            n = rng.integers(self.n)
+        else:
+            n = self.n
+        shuffled_trajs = rng.permutation(trajs)
+        return_trajs = shuffled_trajs[:n]
+        all_states = np.reshape(trajs, (-1, trajs.shape[-1]))
+        all_rewards = np.reshape(rewards, (-1,))
+        shuffled_idxs = rng.permutation(np.arange(len(all_states)))
+        shuffled_states = all_states[shuffled_idxs]
+        shuffled_rewards = rewards[shuffled_idxs]
+        return_states = shuffled_states[:self.num_states]
+        return_rewards = shuffled_rewards[:self.num_states]
+        if self.weights is not None:
+            return return_states.cuda(), return_rewards.cuda(), self.weights[index].cuda()
+        else:
+            return return_states.cuda(), return_rewards.cuda(), 0 # 0 here is in effect None, just not allowed to use None
     
 def get_splits(args):
     prefix = "data/"
@@ -339,11 +385,8 @@ def get_splits(args):
     train_rewards = rewards_by_reward[train_idxs]
     val_states = states_by_reward[val_idxs]
     val_rewards = rewards_by_reward[val_idxs]
-    # Flatten for final dataloader (can change this eventually if we want to train in pairs or more)
-    train_states_flattened = np.reshape(train_states, (-1, train_states.shape[-2], train_states.shape[-1]))
-    train_rewards_flattened = np.reshape(train_rewards, (-1, train_rewards.shape[-1]))
-    val_states_flattened = np.reshape(val_states, (-1, val_states.shape[-2], val_states.shape[-1]))
-    val_rewards_flattened = np.reshape(val_rewards, (-1, val_rewards.shape[-1]))
+    if not args.iid_traj:
+        train_dataset = TaskDataset(
     
     if args.ground_truth_weights or args.rl_evaluation:
         weights_file = prefix + f"weights_{args.num_examples}.npy"
@@ -356,16 +399,17 @@ def get_splits(args):
     else:
         train_weights_flattened, val_weights_flattened = None, None
     
-    if "grid" in args.env:
-        num_classes = 4
-    elif "space" in args.env:
-        num_classes = 6
-    elif "ring" in args.env or "object" in env:
-        num_classes = 0 # Indicates continuous env
-    else:
-        raise NotImplementedError
-    train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened, train_weights_flattened, num_classes)
-    val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, val_weights_flattened, num_classes)
+    # TODO non iid_traj one, and add non-flattened weights        
+            
+    if args.iid_traj:
+        # Flatten for final dataloader (can change this eventually if we want to train in pairs or more)
+        train_states_flattened = np.reshape(train_states, (-1, train_states.shape[-2], train_states.shape[-1]))
+        train_rewards_flattened = np.reshape(train_rewards, (-1, train_rewards.shape[-1]))
+        val_states_flattened = np.reshape(val_states, (-1, val_states.shape[-2], val_states.shape[-1]))
+        val_rewards_flattened = np.reshape(val_rewards, (-1, val_rewards.shape[-1]))
+            
+        train_dataset = NonlinearDataset(train_states_flattened, train_rewards_flattened, train_weights_flattened, num_classes)
+        val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, val_weights_flattened, num_classes)
     
     # training_data, validation_data = random_split(dataset, [train_length, val_length])
     # print("Num training", len(training_data))
