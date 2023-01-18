@@ -1,4 +1,6 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 class PositionalEncoder(nn.Module):
@@ -68,11 +70,20 @@ class TrajectoryNetTransformer(nn.Module):
         self.horizon = horizon
 
     def forward(self, states):
+        # states: (batch size, (n,) horizon, obs dim)
+        # if len(states.shape) == 4:
+        #     n = states.shape[1]
+        #     states = states.reshape(-1, states.shape[-2], states.shape[-1])
+        # else:
+        n = None
         x = self.positional_encoder(states)
         x = self.transformer(x)
         assert(x.shape[1] == self.horizon)
         assert(x.shape[2] == self.obs_size)
         x = torch.mean(x, dim=1)
+        if n is not None:
+            x = x.reshape(-1, n, x.shape[-1])
+            x = torch.sum(x, dim=1)
         x = self.linear1(x)
         x = self.relu(x)
         x = self.linear2(x)

@@ -32,47 +32,47 @@ def parse_args():
     #                     help='Number of training examples')
     # parser.add_argument('--network-type', type=str, default='transformer',
     #                     help='Type of network to train')
-    parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--save-model', default=True, action=argparse.BooleanOptionalAction,
                         help='Whether to save the model after every epoch')
-    parser.add_argument('--save-to', type=str, default='nonlinear_model.parameters',
+    parser.add_argument('--save-to', '-st', type=str, default='nonlinear_model.parameters',
                         help='Destination for saved model')
-    parser.add_argument('--num-epochs', type=int, default=50)
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--mlp', action='store_true')
-    parser.add_argument('--train-split', type=float, default=0.8, help='proportion of data to be in train split')
-    parser.add_argument('--saved-model', type=str, default=None, help='location of saved model to load')
+    parser.add_argument('--num-epochs', '-ne', type=int, default=50)
+    parser.add_argument('--batch-size', '-bs', type=int, default=8)
+    parser.add_argument('--mlp', '-m', action='store_true')
+    parser.add_argument('--evaluate', '-e', action='store_true', help='run for one epoch without updating')
+    parser.add_argument('--saved-model', '-sm', type=str, default=None, help='location of saved model to load')
     parser.add_argument('--verbose', '-v', action='store_true')
-    parser.add_argument('--wandb-project', type=str, default='sirl')
-    parser.add_argument('--permute-types', action='store_true')
-    parser.add_argument('--trajectory-sigmoid', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--wandb-project', '-wp', type=str, default='sirl')
+    parser.add_argument('--permute-types', '-pt', action='store_true')
+    parser.add_argument('--trajectory-sigmoid', '-nts', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--env', default="rings", type=str)
-    parser.add_argument('--num-trajectory-layers', default=1, type=int)
-    parser.add_argument('--num-state-layers', default=1, type=int)
-    parser.add_argument('--state-hidden-size', default=64, type=int)
-    parser.add_argument('--trajectory-hidden-size', default=2048, type=int)
-    parser.add_argument('--lstm', action='store_true')
-    parser.add_argument('--trajectory-rep-dim', default=3, type=int)
-    parser.add_argument('--state-rep-dim', default=3, type=int)
-    parser.add_argument('--ground-truth-weights', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--use-shuffled', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--ground-truth-phi', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--rl-evaluation', default=False, action=argparse.BooleanOptionalAction)
-    parser.add_argument('--max-threads', default=50, type=int, help="For RL evaluation only")
-    parser.add_argument('--num-rings', default=5, type=int, help="For ring env only")
-    # parser.add_argument('--reward-batches', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--num-trajectory-layers', '-ntl', default=1, type=int)
+    parser.add_argument('--num-state-layers', '-nsl', default=1, type=int)
+    parser.add_argument('--state-hidden-size', '-shs', default=64, type=int)
+    parser.add_argument('--trajectory-hidden-size', '-ths', default=2048, type=int)
+    parser.add_argument('--lstm', '-l', action='store_true')
+    parser.add_argument('--repeat-trajectory-calculations', '-rtc', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--trajectory-rep-dim', '-trd', default=3, type=int)
+    parser.add_argument('--state-rep-dim', '-srd', default=3, type=int)
+    parser.add_argument('--ground-truth-weights', '-gtw', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--use-shuffled', '-us', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--ground-truth-phi', '-gtp', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--rl-evaluation', '-re', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--max-threads', '-mt', default=50, type=int, help="For RL evaluation only")
+    parser.add_argument('--num-rings', '-nr', default=5, type=int, help="For ring env only")
+    # parser.add_argument('--reward-batches', '-rb', default=False, action=argparse.BooleanOptionalAction)
     # XXX what is reward batches for?
-    parser.add_argument('--data-prefix', type=str, default="rings_multimove")
-    parser.add_argument('--iid-traj', default=False, action=argparse.BooleanOptionalAction, help="Don't do batching by task")
-    parser.add_argument('--n', default=1, type=int, help="How many trajectories to train on (if iid traj, must be 1)")
-    parser.add_argument('--rand-n', default=False, action=argparse.BooleanOptionalAction, help="Train on a random number of trajectories within each task and epoch")
-    parser.add_argument('--num-states', type=int, help="Number of iid states to predict rewards of per task (defaults to all)")
+    parser.add_argument('--data-prefix', '-dp', type=str, default="rings_multimove")
+    parser.add_argument('--iid-traj', '-it', default=False, action=store_true, help="Don't do batching by task")
+    parser.add_argument('--n', '-n', default=1, type=int, help="How many trajectories to train on (if iid traj, must be 1)")
+    parser.add_argument('--rand-n', '-rn', default=False, action=argparse.BooleanOptionalAction, help="Train on a random number of trajectories within each task and epoch")
+    parser.add_argument('--num-states', '-ns', type=int, help="Number of iid states to predict rewards of per task (defaults to all)")
     args = parser.parse_args()
+    args.num_epochs = args.num_epochs if not args.evaluate else 1
     
     
     assert args.env == "rings", "remember to change the dataset names"
     assert not args.permute_types, "we're not sure this is correct, remember?"
-    
     return args
 
 # class OtherPositionalEncoder(nn.Module):
@@ -133,7 +133,7 @@ class NonlinearDataset(torch.utils.data.Dataset):
 # demonstration trajectory for inference
 # Currently only implemented for rings
 class TaskDataset(torch.utils.data.Dataset):
-    def __init__(self, states, rewards, weights, n=1, rand_n=False, num_states=None):
+        def __init__(self, states, rewards, weights, n=1, rand_n=False, num_states=None):
         self.rewards = torch.Tensor(rewards).to(torch.float) #(n_tasks, n_examples, L)
         self.states = torch.Tensor(states).to(torch.float) #(n_tasks, n_examples, L, S)
         self.weights = weights # usually None
@@ -156,21 +156,17 @@ class TaskDataset(torch.utils.data.Dataset):
             n = rng.integers(self.n)
         else:
             n = self.n
-        shuffled_trajs = trajs[torch.randperm(len(trajs))]
+        shuffled_trajs = rng.permutation(trajs)
         return_trajs = shuffled_trajs[:n]
         all_states = np.reshape(trajs, (-1, trajs.shape[-1]))
         all_rewards = np.reshape(rewards, (-1,))
         shuffled_idxs = rng.permutation(np.arange(len(all_states)))
         shuffled_states = all_states[shuffled_idxs]
-        shuffled_rewards = all_rewards[shuffled_idxs]
+        shuffled_rewards = rewards[shuffled_idxs]
         return_states = shuffled_states[:self.num_states]
         return_rewards = shuffled_rewards[:self.num_states]
-        return_trajs = return_trajs.cuda()
-        return_states = return_states.cuda()
-        return_rewards = return_rewards.cuda()
         if self.weights is not None:
-            return_weights = self.weights[index].cuda()
-            return return_trajs, return_states, return_rewards, return_weights
+            return return_trajs, return_states, return_rewards, self.weights[index]
         else:
             return return_trajs, return_states, return_rewards, 0 # 0 here is in effect None, just not allowed to use None
     
@@ -212,7 +208,7 @@ def get_splits(args):
     # Create train/val split by creating list of task indices, shuffling, and then indexing
     reward_idx_list = np.arange(num_rewards)
     rng.shuffle(reward_idx_list)
-    train_length = int(num_rewards*args.train_split)
+    train_length = int(num_rewards*0.8)
     val_length = num_rewards - train_length
     train_idxs = reward_idx_list[:train_length]
     val_idxs = reward_idx_list[train_length:]
@@ -230,7 +226,7 @@ def get_splits(args):
         val_weights = weights_by_reward[val_idxs]
         val_weights_flattened = np.reshape(val_weights, (-1, val_weights.shape[-1]))
     else:
-        train_weights, val_weights, train_weights_flattened, val_weights_flattened = None, None, None, None
+        train_weights_flattened, val_weights_flattened = None, None
     
     # TODO non iid_traj one, and add non-flattened weights        
             
@@ -244,7 +240,7 @@ def get_splits(args):
         val_dataset = NonlinearDataset(val_states_flattened, val_rewards_flattened, val_weights_flattened, num_classes)
     else:
         train_dataset = TaskDataset(train_states, train_rewards, train_weights, args.n, args.rand_n, args.num_states)
-        val_dataset = TaskDataset(val_states, val_rewards, val_weights, args.n, args.rand_n, args.num_states)
+        val_dataset = TestDataset(val_states, val_rewards, val_weights, args.n, args.rand_n, args.num_states)
     
     # training_data, validation_data = random_split(dataset, [train_length, val_length])
     # print("Num training", len(training_data))
@@ -269,22 +265,6 @@ def evaluate_rl(traj_rep, state_encoder, weights):
         mean_random_ret = evaluate_policy(random_model, ground_truth_env, n_eval_episodes=100)
         means[i] = [mean_ground_truth_pred_model_ret[0], mean_ground_truth_ret[0], mean_random_ret[0]]
     return np.mean(means, axis=0)
-
-def get_batch_loss(net, optimizer, loss_func, horizon, traj_batch, states_batch, rewards_batch, weights_batch, args, disp=False):
-    if args.ground_truth_weights:
-        prediction = net.forward(states_batch, weights_batch)
-    else:
-        prediction = net.forward(states_batch)
-    loss = loss_func(prediction, rewards_batch)
-    wandb.log({'train loss': loss})
-    # loss.backward()
-    if args.verbose and disp:
-        print("Predicted vs actual rewards: \n", np.array(list(zip(prediction.cpu().detach().numpy(), rewards_batch.cpu().detach().numpy()))))
-        print("Maximum error: \n", torch.max((prediction-rewards_batch)**2))
-        worst = torch.argmax((prediction-rewards_batch)**2)
-        print("Argmax of error: \n", prediction.flatten()[worst], rewards_batch.flatten()[worst])
-        print("Trajectory reps: \n", net.trajectory_encoder(states_batch))
-    return loss
 
 def train(args):
     wandb.init(project='sirl')
@@ -317,12 +297,13 @@ def train(args):
                        args.num_state_layers, 
                        mlp=args.mlp, 
                        trajectory_sigmoid=args.trajectory_sigmoid, 
-                       lstm=args.lstm,
+                       lstm=args.lstm, 
+                       repeat_trajectory_calculations=args.repeat_trajectory_calculations, 
                        ground_truth_phi = args.ground_truth_phi).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
 
-    optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(net.parameters()) if not args.evaluate else None
     loss_func = nn.MSELoss()
     
     # assert args.rl_evaluation == args.ground_truth_weights, "You're using ground truth weights, are you sure you want to do that?"
@@ -331,45 +312,103 @@ def train(args):
 
     
     for epoch in range(args.num_epochs):
-        total_loss = 0
+        avg_loss = 0
         n_samples = 0
-        net.train()
+        if args.evaluate:
+            net.eval()
+        else:
+            net.train()
         with tqdm(train_dataloader, unit="batch") as tepoch:
-            for traj_batch, states_batch, rewards_batch, weights_batch in tepoch:
-                
-                optimizer.zero_grad()
-                loss = get_batch_loss(net, optimizer, loss_func, horizon, traj_batch, states_batch, rewards_batch, weights_batch, args, disp=tepoch.n%100==0)     
-                loss.backward()
-                optimizer.step()
-                
+            for states_batch, rewards_batch, weights_batch in tepoch:
+                # if torch.any(torch.all(weights_batch < 0, axis=1)):
+                    # breakpoint()
+                # states_batch: (bsize, horizon, obs_size)
+                # rewards_batch: (bsize, horizon)
                 tepoch.set_description(f"Epoch {epoch}")
-                total_loss += loss.item() * args.batch_size * horizon
+                # In effect, we now batch by batch *and* t
+                if not args.evaluate:
+                    optimizer.zero_grad()
+                if not args.repeat_trajectory_calculations:
+                    if args.ground_truth_weights:
+                        prediction = net.forward(states_batch, weights_batch)
+                    else:
+                        prediction = net.forward(states_batch)
+                else:
+                    trajectory_batch = states_batch.unsqueeze(1).expand(-1, horizon, horizon, obs_size) #repeat trajectory horizon times
+                    trajectory_batch = trajectory_batch.reshape(-1, horizon, obs_size) # return to batch form: (bsize*L, L, obs_size)
+                    states_batch = states_batch.view(-1, obs_size) # (bsize*L, obs_size)
+                    rewards_batch = rewards_batch.view(-1) # bsize * L
+                    prediction = net.forward(trajectory_batch, states_batch)
+                loss = loss_func(prediction, rewards_batch)
+                wandb.log({'train loss': loss})
+                # loss.backward()
+                if args.verbose and tepoch.n % 100 == 0:
+                    print("Predicted vs actual rewards: \n", np.array(list(zip(prediction.cpu().detach().numpy(), rewards_batch.cpu().detach().numpy()))))
+                    print("Maximum error: \n", torch.max((prediction-rewards_batch)**2))
+                    worst = torch.argmax((prediction-rewards_batch)**2)
+                    print("Argmax of error: \n", prediction.flatten()[worst], rewards_batch.flatten()[worst])
+                    print("Trajectory reps: \n", net.trajectory_encoder(states_batch))
+                    # for name, param in net.named_parameters():
+                    #     if param.grad is not None:
+                    #         grad = torch.max(param.grad)
+                    #     else:
+                    #         grad = None
+                    #     print(name, param, grad)
+                avg_loss += loss.item() * args.batch_size * horizon
                 n_samples += args.batch_size * horizon
-                tepoch.set_postfix({"avg loss": total_loss/n_samples})
+                if not args.evaluate:
+                    loss.backward()
+                    optimizer.step()
+                if args.rl_evaluation and (tepoch.n % 100 == 0 or tepoch.n % 101 == 0):
+                    # n_threads = min(args.max_threads, psutil.cpu_count()-1)
+                    traj_reps = net.trajectory_encoder(states_batch).cpu().detach().numpy()
+                    ray.init(num_cpus=NUM_AGENTS_PER_GPU, num_gpus=1)
+                    rets = ray.get([evaluate_rl.remote(traj_rep, net.state_encoder, weights) for traj_rep, weights in zip(traj_reps, weights_batch.detach().cpu().numpy())])
+                    for ret in rets:
+                        wandb.log({"rl_pred": ret[0], "rl_true": ret[1], "rl_random": ret[2]})
+                    ray.shutdown()
+                        
+                tepoch.set_postfix({"avg loss": avg_loss/n_samples})
 
-        avg_loss = total_loss/(len(train_dataloader)*horizon*args.batch_size)
+        avg_loss /= len(train_dataloader)*horizon*args.batch_size
         #n_correct /= (3 * len(training))
 
         # UNCOMMENT TO SAVE MODEL
-        if args.save_model:
+        if args.save_model and not args.evaluate:
             torch.save(net.state_dict(), args.save_to)
 
         avg_training_loss = avg_loss
         print(f"Average training loss: {avg_training_loss}")
         wandb.log({'average train loss': avg_training_loss})
-        total_loss = 0
+        avg_loss = 0
         n_samples = 0
         net.eval()
         with torch.no_grad():
             with tqdm(validation_dataloader, unit="batch") as tepoch:
-                for traj_batch, states_batch, rewards_batch, weights_batch in tepoch:
-                    loss = get_batch_loss(net, optimizer, loss_func, horizon, traj_batch, states_batch, rewards_batch, weights_batch, args, disp=tepoch.n%100==0) 
-                    
-                    total_loss += loss.item() * args.batch_size * horizon
+                for states_batch, rewards_batch, weights_batch in tepoch:
+                    # states_batch: (bsize, horizon, 100)
+                    # rewards_batch: (bsize, horizon)
+                    tepoch.set_description("Epoch {epoch} (validation)")
+                    # In effect, we now batch by batch *and* t
+                    if not args.repeat_trajectory_calculations:
+                        if args.ground_truth_weights:
+                            prediction = net.forward(states_batch, weights_batch)
+                        else:
+                            prediction = net.forward(states_batch)
+                    else:
+                        trajectory_batch = states_batch.unsqueeze(1).expand(-1, horizon, horizon, 25*num_classes) #repeat trajectory horizon times
+                        trajectory_batch = trajectory_batch.reshape(-1, horizon, 25*num_classes) # return to batch form: (bsize*L, L, 100)
+                        states_batch = states_batch.view(-1, 25*num_classes) # (bsize*L, 100)
+                        rewards_batch = rewards_batch.view(-1) # bsize * L
+                        prediction = net.forward(trajectory_batch, states_batch)
+                    loss = loss_func(prediction, rewards_batch)
+                    avg_loss += loss.item() * args.batch_size * horizon
                     n_samples += args.batch_size*horizon
-                    tepoch.set_postfix({"avg validation loss": total_loss/n_samples})
-        avg_loss = total_loss/(len(validation_dataloader)*horizon*args.batch_size)
+                    tepoch.set_postfix({"avg validation loss": avg_loss/n_samples})
+        avg_loss /= len(validation_dataloader)*horizon*args.batch_size
         wandb.log({'average validation loss': avg_loss})
+    if not args.evaluate:
+        torch.save(net.state_dict(), args.save_to)
         
         
 

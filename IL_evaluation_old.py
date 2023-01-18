@@ -7,7 +7,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = str(FREEST_GPU)
 import argparse
 import numpy as np
-from models import NonLinearNet
+from predict_transformer_nonlinear import NonLinearNet
 import stable_baselines3
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -163,6 +163,7 @@ def load_model(location, obs_size, horizon):
     mlp = False
     trajectory_sigmoid = False
     lstm = False
+    repeat_trajectory_calculations = False
     ground_truth_phi = False
     
     net = NonLinearNet(trajectory_rep_dim, state_rep_dim, state_hidden_size, 64, trajectory_hidden_size, obs_size, horizon, num_trajectory_layers, num_state_layers, mlp=mlp, trajectory_sigmoid=trajectory_sigmoid, lstm=lstm, repeat_trajectory_calculations=repeat_trajectory_calculations, ground_truth_phi = ground_truth_phi)
@@ -263,7 +264,7 @@ def main(args):
             sirl_percentiles = np.digitize(sirl_rets, random_rets_sorted)
             gail_percentiles = np.digitize(gail_rets, random_rets_sorted)
             airl_percentiles = np.digitize(airl_rets, random_rets_sorted)
-            bc_percentiles = np.digitize(bc_rets, random_rets_sorted)
+            bc_percentiles = np.digitize(bc_rets, random_rets_sorted)]
             wandb.log({'random_rew_ret': ave_random_rew_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret, 'bc_ret': ave_bc_ret, 'ground_truth_percentiles': ground_truth_percentiles, 'sirl_percentiles': sirl_percentiles, 'gail_percentiles': gail_percentiles, 'airl_percentiles': airl_percentiles, 'bc_percentiles': bc_percentiles})
         else:
             # wandb.log({'random_ret': ave_random_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})

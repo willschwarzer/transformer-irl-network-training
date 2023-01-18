@@ -1,4 +1,7 @@
 from modules import *
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class NonLinearNet(nn.Module):
     def __init__(self, trajectory_rep_dim, 
@@ -13,12 +16,10 @@ class NonLinearNet(nn.Module):
                  mlp=False, 
                  trajectory_sigmoid=False, 
                  lstm=False, 
-                 repeat_trajectory_calculations=False,
                  ground_truth_phi=False):
         
         super().__init__()
         assert trajectory_rep_dim == state_rep_dim, "Non-matching rep dims not yet implemented!"
-        assert not repeat_trajectory_calculations, "Really shouldn't be repeating calculations"
         if lstm:
             self.trajectory_encoder = TrajectoryNetLSTM(obs_size, num_trajectory_layers)
         else:
@@ -27,10 +28,6 @@ class NonLinearNet(nn.Module):
         self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_state_layers, obs_size)
         self.mlp = mlp
         self.horizon = horizon
-        if repeat_trajectory_calculations:
-            self.forward = self.forward_repeat
-        else:
-            self.forward = self.forward_no_repeat
         if mlp:
             self.reward_layer = RewardNet(trajectory_rep_dim, state_rep_dim, reward_hidden_size)
         else:
@@ -44,19 +41,9 @@ class NonLinearNet(nn.Module):
                 self.inv_distances[x, y] = 1/(np.abs(x-2) + np.abs(y-2))
             self.inv_distances[2, 2] = 20.
             self.inv_distances = torch.flatten(self.inv_distances)
-
-    def forward_repeat(self, trajectory, state):
-        assert False, "no"
-        trajectory_rep = self.trajectory_encoder(trajectory)
-        state_rep = self.state_encoder(state)
-        if self.mlp:
-            reward = self.reward_layer(trajectory_rep, state_rep)
-        else:
-            reward = torch.einsum('bs,bs->b', trajectory_rep, state_rep)
-        return reward
     
-    def forward_no_repeat(self, trajectories, weights=None):
-        # trajectories: (bsize, L, |S|)
+    def forward(self, trajectories, weights=None):
+        # trajectories: (bsize, L, |S|) or (bsize, n, L, |S|)
         if weights is None:
             trajectory_rep = self.trajectory_encoder(trajectories) # (bsize, rep_dim)
         else:
