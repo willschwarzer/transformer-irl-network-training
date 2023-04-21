@@ -71,11 +71,11 @@ class TrajectoryNetTransformer(nn.Module):
 
     def forward(self, states):
         # states: (batch size, (n,) horizon, obs dim)
-        # if len(states.shape) == 4:
-        #     n = states.shape[1]
-        #     states = states.reshape(-1, states.shape[-2], states.shape[-1])
-        # else:
-        n = None
+        if len(states.shape) == 4:
+            n = states.shape[1]
+            states = states.reshape(-1, states.shape[-2], states.shape[-1])
+        else:
+            n = None
         x = self.positional_encoder(states)
         x = self.transformer(x)
         assert(x.shape[1] == self.horizon)
