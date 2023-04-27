@@ -87,7 +87,10 @@ def evaluate_sirl(pred_env, ground_truth_env, rl_its, num_eval_episodes, save_de
     pred_agent = stable_baselines3.PPO("MlpPolicy", pred_env, verbose=1, device='cpu')
     pred_agent.learn(total_timesteps=rl_its)
     mean_ground_truth_pred_agent_ret, _ = evaluate_policy(pred_agent, ground_truth_env, n_eval_episodes=num_eval_episodes)
+    # Save agent
     pred_agent.save(os.path.join(save_dest, "sirl", str(mean_ground_truth_pred_agent_ret)))
+    # Also save the environment's predicted reward weights
+    np.save(os.path.join(save_dest, "sirl", str(mean_ground_truth_pred_agent_ret) + "_weights"), pred_env.object_rewards.detach().numpy())
     return mean_ground_truth_pred_agent_ret
 
 # @ray.remote(num_gpus=1/(NUM_AGENTS_PER_GPU))

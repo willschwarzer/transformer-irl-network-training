@@ -5,12 +5,8 @@ import gym
 from gym import spaces
 from enum import IntEnum
 import numpy as np
-import jax.numpy as jnp
-from jax import random
-from jax import jit
 from functools import partial
-import jax
-import cv2 as cv
+import cv2 as cv # OpenCV (pip: )
 import palettable
 from palettable.tableau import TableauLight_10, ColorBlind_10
 import torch
@@ -21,7 +17,24 @@ IM_SIZE = 256
 BLOCK_SIZE = 8
 
 class ObjectEnv(gym.Env):
-    def __init__(self, object_rewards, state_encoder=None, seed=0, env_size=10, num_rings=3, move_allowance=True, im_size=256, block_size=16, block_thickness=4, episode_len=150, max_move_dist=1, act_space_bounds=1e9, min_block_dist=0.01, intersection=False, manual_clipping=False, single_move=False):
+    def __init__(self, 
+                 object_rewards, 
+                 state_encoder=None, 
+                 seed=0, 
+                 env_size=10, 
+                 num_rings=3, 
+                 move_allowance=True, 
+                 im_size=256, 
+                 block_size=16, 
+                 block_thickness=4, 
+                 episode_len=150, 
+                 max_move_dist=1, 
+                 act_space_bounds=1e9, 
+                 min_block_dist=0.01, 
+                 intersection=False, 
+                 manual_clipping=False, 
+                 single_move=False, 
+                 ground_truth_object_rewards=None):
         super().__init__()
         if state_encoder is None: # Otherwise object_rewards is just the trajectory rep
             assert(len(object_rewards) == (num_rings*(num_rings-1)//2))
@@ -44,32 +57,38 @@ class ObjectEnv(gym.Env):
         self.single_move = single_move
         self.palette = TableauLight_10.colors
         self.state_encoder = state_encoder
+        self.ground_truth_object_rewards = ground_truth_object_rewards # Used for predicted environments to compare to ground truth
         
-        self.key = random.PRNGKey(seed)
+        np.random.seed(seed)
         
         # Make a triangular-array-compatible weight vector to allow for efficient
         # computation later
         if state_encoder is None:
-            tril = jnp.tril(jnp.ones([num_rings, num_rings]), k=-1) # Lower triangle of matrix, not including main diag
-            self.expanded_object_rewards = tril.at[jnp.nonzero(tril)].set(object_rewards)
+            tril = np.tril(np.ones([num_rings, num_rings]), k=-1)
+            self.expanded_object_rewards = np.zeros_like(tril)
+            self.expanded_object_rewards[np.nonzero(tril)] = object_rewards
+        elif self.ground_truth_object_rewards is not None:
+            tril = np.tril(np.ones([num_rings, num_rings]), k=-1)
+            self.expanded_ground_truth_object_rewards = np.zeros_like(tril)
+            self.expanded_ground_truth_object_rewards[np.nonzero(tril)] = ground_truth_object_rewards
         
-        self.state_bounds = jnp.array([-env_size/2, env_size/2], dtype=float)
+        self.state_bounds = np.array([-env_size/2, env_size/2], dtype=float)
         
         self.action_space = spaces.Box(low=-act_space_bounds, high=act_space_bounds, shape=(num_rings*2,))
         self.observation_space = spaces.Box(low=-env_size/2, high=env_size/2, shape=(num_rings, 2))
         
-        self.state, self.key = _init_state(self.key, num_rings, env_size)
+        self.state = _init_state(num_rings, env_size)
         
 
     def step(self, action, alt_reward=[0,0,0], render=False):
-        action = jnp.array(action)
+        action = np.array(action)
         if self.state_encoder is None:
             # breakpoint()
             self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds, self.move_allowance*self.max_move_dist, self.min_block_dist, self.intersection, self.manual_clipping, self.single_move)
             # self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds)
         else:
             self.state = _next_state(self.state, action, self.state_bounds, self.move_allowance, self.single_move)
-            state_rep = self.state_encoder(torch.Tensor(np.asarray(jnp.reshape(self.state, (-1,)))))
+            state_rep = self.state_encoder(torch.Tensor(np.asarray(np.reshape(self.state, (-1,)))))
             reward = np.dot(state_rep.detach().cpu().numpy(), self.object_rewards)
 
         self.nsteps += 1
@@ -79,7 +98,7 @@ class ObjectEnv(gym.Env):
 
     def reset(self):
         # print(self.state)
-        self.state, self.key = _init_state(self.key, self.num_rings, self.env_size)
+        self.state = _init_state(self.num_rings, self.env_size)
         # self.state = jnp.clip(self.state, self.state_bounds[0] - 0.5, self.state_bounds[1] - 0.5)
         # self.state = self.state.at[1].set(self.state[0] + 0.5)
         # self.state = jnp.clip(self.state, self.state_bounds[0], self.state_bounds[1])
@@ -88,7 +107,7 @@ class ObjectEnv(gym.Env):
         
         return self.state
 
-    def render(self, mode='human', close=False, circles=True, reward=None):
+    def render(self, mode='human', close=False, circles=True, reward=None, pred_reward=None):
         im = np.zeros((self.im_size, self.im_size, 3), dtype=np.uint8)
         if circles:
             # size = int(self.min_block_dist*(self.im_size/self.env_size)/2)
@@ -104,22 +123,35 @@ class ObjectEnv(gym.Env):
                 cv.circle(im, (x, y), size, self.palette[idx], self.block_thickness)
             else:
                 cv.rectangle(im, (x-self.block_size//2, y-self.block_size//2), (x+self.block_size//2, y+self.block_size//2), self.palette[idx], self.block_thickness)
+        # Display reward on the upper left corner
         if reward is not None:
             (box_width, box_height), baseline = cv.getTextSize("{:.2f}".format(abs(reward)), cv.FONT_HERSHEY_SIMPLEX, 1, 1)
             org = (0, box_height + baseline//2)
             c = int(abs(reward)*255)
             cv.putText(im, "{:.2f}".format(abs(reward)), org, cv.FONT_HERSHEY_SIMPLEX, 1, (255-c, 255, 255-c) if reward >= 0 else (255, 255-c, 255-c), 1, cv.LINE_AA)
+        # Display pred_reward on the upper right corner
+        if pred_reward is not None:
+            (box_width, box_height), baseline = cv.getTextSize("{:.2f}".format(abs(pred_reward)), cv.FONT_HERSHEY_SIMPLEX, 1, 1)
+            org = (self.im_size - box_width, box_height + baseline//2)
+            c = int(abs(pred_reward)*255)
+            cv.putText(im, "{:.2f}".format(abs(pred_reward)), org, cv.FONT_HERSHEY_SIMPLEX, 1, (255-c, 255, 255-c) if pred_reward >= 0 else (255, 255-c, 255-c), 1, cv.LINE_AA)
         return np.moveaxis(im, -1, 0)
     
     def rollout_and_render(self, model, show_reward=False):
         self.reset()
-        done = False
         ims = np.zeros((self.episode_len, 3, self.im_size, self.im_size), dtype=np.uint8)
         ims[0] = self.render()
         a, _ = model.predict(self.state)
         for i in range(1, self.episode_len):
-            state, reward, _, _ = self.step(a)
-            ims[i] = self.render(reward=(reward if show_reward else None))
+            _, reward, _, _ = self.step(a)
+            # Also display predicted reward if state encoder is used
+            if self.ground_truth_object_rewards is not None and show_reward:
+                # Get ground truth reward
+                ground_truth_reward = _get_reward(self.state, self.expanded_ground_truth_object_rewards, self.min_block_dist, self.intersection)
+                # Render with both ground truth and predicted reward
+                ims[i] = self.render(reward=ground_truth_reward, pred_reward=reward)
+            else:
+                ims[i] = self.render(reward=(reward if show_reward else None))
             a, _ = model.predict(self.state)
         return ims
     
@@ -147,64 +179,48 @@ class ObjectEnv(gym.Env):
         # cv.imwrite("test.png", im)
         return im
             
+def _init_state(num_rings, env_size):
+    return np.random.uniform(low=-env_size / 2, high=env_size / 2, size=(num_rings, 2))
 
-@partial(jit, static_argnums=(1, 2), backend='cpu')
-def _init_state(key, num_rings, env_size):
-    key, subkey = random.split(key)
-    state = random.uniform(subkey, shape=(num_rings, 2), minval=-env_size/2, maxval=env_size/2)
-    return state, key
-
-@partial(jit, static_argnums=(4, 5, 6, 7, 8))
 def _step(state, action, weights, state_bounds, move_allowance, min_block_dist, intersection, manual_clipping, single_move):
     state = _next_state(state, action, state_bounds, move_allowance, single_move)
     reward = _get_reward(state, weights, min_block_dist, intersection)
-    # if manual_clipping:
-    #     reward = 0 # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    #     violations = jnp.maximum(jnp.abs(action) - 1, 0)
-    #     # reward = 10*jnp.any(violations) + 10*jnp.sum(violations)
-    #     # reward *= -1
-    #     # reward -= 10*(violations[-1] + violations[-2] + violations[-3] + violations[-4])
-    #     reward -= 10*(violations[-1] + violations[-2])
-    #     state *= 0
-    #     # breakpoint()
     return state, reward
 
-@partial(jit, static_argnums=(3, 4))
-# @partial(jit, static_argnums=(3,))
 def _next_state(state, action, state_bounds, move_allowance, single_move):
     # action = action.at[:-2].set(0)
     # action = action.at[-1].set(0)
-    moves = jnp.reshape(action, (len(state), 2))
+    moves = np.reshape(action, (len(state), 2))
     # state = state.at[(-1, 1)].set(state[(-2, 1)])
     if move_allowance:
         # allowance = jnp.reshape(action[:len(state)], (len(state), 1))
         # moves = jnp.reshape(action[len(state):], (len(state), 2)) * allowance
-        move_dists = jnp.sqrt(jnp.sum(moves**2, axis=-1))
+        move_dists = np.sqrt(np.sum(moves**2, axis=-1))
         if single_move:
-            mask = jnp.zeros(len(moves))
-            mask = jnp.expand_dims(mask.at[jnp.argmax(move_dists)].set(1), 1)
+            mask = np.zeros(len(moves))
+            mask[np.argmax(move_dists)] = 1
+            mask = np.expand_dims(mask, 1)
             moves *= mask
-            move_dists = jnp.sqrt(jnp.sum(moves**2, axis=-1))
-        total_dist = jnp.sum(move_dists)
-        moves *= jnp.minimum(move_allowance/total_dist, 1)
+            move_dists = np.sqrt(np.sum(moves**2, axis=-1))
+        total_dist = np.sum(move_dists)
+        moves *= np.minimum(move_allowance/total_dist, 1)
     state += moves
-    state = jnp.clip(state, state_bounds[0], state_bounds[1])
+    state = np.clip(state, state_bounds[0], state_bounds[1])
     return state
 
-@partial(jit, static_argnums=(2, 3))
 def _get_reward(state, weights, min_block_dist, intersection):
     # state: (num_rings, 2)
     num_pairs = len(state)*(len(state)-1)//2
-    obj_matrix_a = jnp.expand_dims(state, 1)
-    obj_matrix_b = jnp.expand_dims(state, 0)
-    squared_diffs = jnp.power(obj_matrix_a - obj_matrix_b, 2)
-    squared_dists = jnp.sum(squared_diffs, axis=-1)
-    dists = jnp.sqrt(squared_dists)
+    obj_matrix_a = np.expand_dims(state, 1)
+    obj_matrix_b = np.expand_dims(state, 0)
+    squared_diffs = np.power(obj_matrix_a - obj_matrix_b, 2)
+    squared_dists = np.sum(squared_diffs, axis=-1)
+    dists = np.sqrt(squared_dists)
     if intersection:
         # arbitrary large distance for non-intersecting
-        clipped_dists = jnp.where(dists <= min_block_dist, min_block_dist, 1000000)
+        clipped_dists = np.where(dists <= min_block_dist, min_block_dist, 1000000)
     else:
-        clipped_dists = jnp.clip(dists, a_min=min_block_dist)
+        clipped_dists = np.clip(dists, a_min=min_block_dist)
     inv_dists = 1/clipped_dists
-    reward = jnp.sum(inv_dists*weights)
+    reward = np.sum(inv_dists*weights)
     return reward
