@@ -54,6 +54,8 @@ def parse_args():
     parser.add_argument('--agent-save-dir', default="imitation_agents", type=str)
     parser.add_argument('--save-agents', default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument('--overwrite-agents', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--methods', type=str, default='all',
+                        help='Subset of methods to evaluate, separated by commas. Options: sirl, bc, random_rew, ground_truth, gail, airl, all')
     args = parser.parse_args()
     return args
 
@@ -142,14 +144,6 @@ def evaluate_bc(rollouts, env, bc_epochs, num_eval_episodes, save_dest):
     mean_ret, _ = evaluate_policy(bc_trainer.policy, env, n_eval_episodes=num_eval_episodes)
     bc_trainer.policy.save(os.path.join(save_dest, 'bc', str(mean_ret)))
     return mean_ret
-
-# def get_rets_and_save_models(alg, args):
-    
-    
-#     if args.save_agents:
-        
-    
-#     return 
     
 
 def load_model(location, obs_size, horizon):
@@ -217,6 +211,14 @@ def main(args):
     agents = os.listdir(args.agent_directory)
     agents_random = rng.permuted(agents)
     agents = agents_random[:args.num_random_agents]
+
+    if args.methods.lower() == "all":
+        methods = ['sirl', 'bc', 'random_rew', 'ground_truth', 'gail', 'airl']
+    else:
+        methods = args.methods.split(',')
+        if args.percentile_evaluation and 'random_rew' not in methods:
+            methods.append('random_rew')
+
     ray.init(num_cpus=10, num_gpus=0)
     for rollout_batch, traj_batch, weights in zip(rollout_batches, state_batches, weights):
         if "grid" in args.env:
@@ -236,11 +238,8 @@ def main(args):
                                          single_move=args.single_move)
         else:
             raise NotImplementedError
-        
-        # if args.save_agents:
-        #     if os.path.isfile(args.agent_save_dir) and args.overwrite_agents:
-        #         shutil.rmtree(args.agent_save_dir)
-        #     os.
+
+
         save_dest = os.path.join(args.agent_save_dir, str(weights))
         if not os.path.exists(args.agent_save_dir):
             os.mkdir(args.agent_save_dir)
@@ -249,116 +248,111 @@ def main(args):
         for ext in ["sirl", "bc", "random_rew", "ground_truth", "gail", "airl"]:
             if not os.path.exists(os.path.join(save_dest, ext)):
                 os.mkdir(os.path.join(save_dest, ext))
-            
-        # Our method
-        sirl_in = traj_batch[:, :, :].unsqueeze(0)
-        traj_rep = trajectory_encoder(sirl_in).squeeze().detach().numpy()
-        if "grid" in args.env:
-            pred_env = NewBlockEnv(traj_rep, state_encoder)
-        elif "ring" in args.env or "object" in args.env:
-            seed = rng.integers(10000)
-            pred_env = ObjectEnv(traj_rep,
-                                 state_encoder=state_encoder,
-                                 num_rings=args.num_rings,
-                                 seed=seed, env_size=1,
-                                 move_allowance=True,
-                                 episode_len=50,
-                                 min_block_dist=0.25,
-                                 intersection=True,
-                                 max_move_dist=0.1,
-                                 block_thickness=2,
-                                 single_move=args.single_move)
-        else:
-            raise NotImplementedError
-        sirl_rets = ray.get([evaluate_sirl.remote(pred_env, 
-                                                  ground_truth_env, 
-                                                  args.rl_its, 
-                                                  args.num_eval_episodes,
-                                                  save_dest) for i in range(args.num_trials)])
 
-        ave_sirl_ret = np.mean(sirl_rets)
+        log_dict = {}
+    
+        if "random_rew" in methods:
+            random_rew_rets = ray.get([evaluate_random_rew.remote(ground_truth_env,
+                                                                  f"{args.agent_directory}/{agent_name}",
+                                                                  args.num_eval_episodes, 
+                                                                  save_dest) for agent_name in agents])
+            ave_random_rew_ret = np.mean(random_rew_rets)
+            log_dict['random_rew_ret'] = ave_random_rew_ret
         
-        # for ret, policy in zip(sirl_rets, sirl_policies):
-        #     policy.save(os.path.join(save_dest, 'sirl', ret))
-        
-        bc_rets = ray.get([evaluate_bc.remote(rollout_batch, 
+        if "ground_truth" in methods:
+            ground_truth_rets = ray.get([evaluate_ground_truth.remote(ground_truth_env, 
+                                                                      args.rl_its, 
+                                                                      args.num_eval_episodes, 
+                                                                      save_dest) for i in range(args.num_trials)])
+            ave_ground_truth_ret = np.mean(ground_truth_rets)
+            log_dict['ground_truth_ret'] = ave_ground_truth_ret
+            
+        if "sirl" in methods:
+            # Run the method to get the predicted env
+            sirl_in = traj_batch[:, :, :].unsqueeze(0)
+            traj_rep = trajectory_encoder(sirl_in).squeeze().detach().numpy()
+
+            traj_rep_to_save = traj_rep.squeeze().detach().numpy()
+            np.save(os.path.join(save_dest, "sirl", "traj_rep.npy"), traj_rep_to_save)
+            if "grid" in args.env:
+                pred_env = NewBlockEnv(traj_rep, state_encoder)
+            elif "ring" in args.env or "object" in args.env:
+                seed = rng.integers(10000)
+                pred_env = ObjectEnv(traj_rep,
+                                    state_encoder=state_encoder,
+                                    num_rings=args.num_rings,
+                                    seed=seed, env_size=1,
+                                    move_allowance=True,
+                                    episode_len=50,
+                                    min_block_dist=0.25,
+                                    intersection=True,
+                                    max_move_dist=0.1,
+                                    block_thickness=2,
+                                    single_move=args.single_move)
+            else:
+                raise NotImplementedError
+            sirl_rets = ray.get([evaluate_sirl.remote(pred_env, 
+                                                      ground_truth_env, 
+                                                      args.rl_its, 
+                                                      args.num_eval_episodes,
+                                                      save_dest) for i in range(args.num_trials)])
+            ave_sirl_ret = np.mean(sirl_rets)
+            log_dict['sirl_ret'] = ave_sirl_ret
+            
+        if "bc" in methods:
+            bc_rets = ray.get([evaluate_bc.remote(rollout_batch, 
                                               ground_truth_env, 
                                               args.bc_epochs, 
                                               args.num_eval_episodes, 
                                               save_dest) for i in range(args.num_trials)])
-        ave_bc_ret = np.mean(bc_rets)
-        # for ret, policy in zip(bc_rets, bc_policies):
-        #     policy.save(os.path.join(save_dest, 'bc', ret))
-        
-        random_rew_rets = ray.get([evaluate_random_rew.remote(ground_truth_env,
-                                                              f"{args.agent_directory}/{agent_name}",
-                                                              args.num_eval_episodes, 
-                                                              save_dest) for agent_name in agents])
-        ave_random_rew_ret = np.mean(random_rew_rets)
-        
-        # for ret, policy in zip(random_rew_rets, random_rew_policies):
-        #     policy.save(os.path.join(save_dest, 'random_rew', ret))
+            ave_bc_ret = np.mean(bc_rets)
+            log_dict['bc_ret'] = ave_bc_ret
 
-    #         # Ground truth
-        ground_truth_rets = ray.get([evaluate_ground_truth.remote(ground_truth_env, 
-                                                                  args.rl_its, 
-                                                                  args.num_eval_episodes, 
-                                                                  save_dest) for i in range(args.num_trials)])
-        ave_ground_truth_ret = np.mean(ground_truth_rets)
-        
-        # for ret, policy in zip(ground_truth_rets, ground_truth_policies):
-        #     policy.save(os.path.join(save_dest, 'ground_truth', ret))
+        if "gail" in methods:
+            gail_rets = ray.get([evaluate_adversarial.remote(rollout_batch, 
+                                                             ground_truth_env, 
+                                                             'gail', 
+                                                             args.adv_its, 
+                                                             args.num_eval_episodes, 
+                                                             save_dest) for i in range(args.num_trials)])
+            ave_gail_ret = np.mean(gail_rets)
+            log_dict['gail_ret'] = ave_gail_ret
 
-        # GAIL
-        gail_rets = ray.get([evaluate_adversarial.remote(rollout_batch, 
-                                                         ground_truth_env, 
-                                                         'gail', 
-                                                         args.adv_its, 
-                                                         args.num_eval_episodes, 
-                                                         save_dest) for i in range(args.num_trials)])
-        ave_gail_ret = np.mean(gail_rets)
-        
-        # for ret, policy in zip(gail_rets, gail_policies):
-        #     policy.save(os.path.join(save_dest, 'gail', ret))
-
-        # AIRL
-        airl_rets = ray.get([evaluate_adversarial.remote(rollout_batch, 
-                                                         ground_truth_env, 
-                                                         'airl', 
-                                                         args.adv_its, 
-                                                         args.num_eval_episodes, 
-                                                         save_dest) for i in range(args.num_trials)])
-        ave_airl_ret = np.mean(airl_rets)
-        
-        # for ret, policy in zip(airl_rets, airl_policies):
-        #     policy.save(os.path.join(save_dest, 'airl', ret))
-        
+        if "airl" in methods:
+            airl_rets = ray.get([evaluate_adversarial.remote(rollout_batch, 
+                                                             ground_truth_env, 
+                                                             'airl', 
+                                                             args.adv_its, 
+                                                             args.num_eval_episodes, 
+                                                             save_dest) for i in range(args.num_trials)])
+            ave_airl_ret = np.mean(airl_rets)
+            log_dict['airl_ret'] = ave_airl_ret
+            
         if args.percentile_evaluation:
             random_rets_sorted = np.sort(random_rew_rets)
-            ground_truth_percentiles = np.digitize(ground_truth_rets, random_rets_sorted)
-            sirl_percentiles = np.digitize(sirl_rets, random_rets_sorted)
-            gail_percentiles = np.digitize(gail_rets, random_rets_sorted)
-            airl_percentiles = np.digitize(airl_rets, random_rets_sorted)
-            bc_percentiles = np.digitize(bc_rets, random_rets_sorted)
-            wandb.log({'random_rew_ret': ave_random_rew_ret, 
-                       'ground_truth_ret': ave_ground_truth_ret, 
-                       'sirl_ret': ave_sirl_ret, 
-                       'gail_ret': ave_gail_ret, 
-                       'airl_ret': ave_airl_ret, 
-                       'bc_ret': ave_bc_ret, 
-                       'ground_truth_percentiles': ground_truth_percentiles, 
-                       'sirl_percentiles': sirl_percentiles, 
-                       'gail_percentiles': gail_percentiles, 
-                       'airl_percentiles': airl_percentiles, 
-                       'bc_percentiles': bc_percentiles})
-        else:
-            # wandb.log({'random_ret': ave_random_ret, 'ground_truth_ret': ave_ground_truth_ret, 'sirl_ret': ave_sirl_ret, 'gail_ret': ave_gail_ret, 'airl_ret': ave_airl_ret})
-            wandb.log({'random_rew_ret': ave_random_rew_ret, 
-                       'ground_truth_ret': ave_ground_truth_ret, 
-                       'sirl_ret': ave_sirl_ret, 
-                       'gail_ret': ave_gail_ret, 
-                       'airl_ret': ave_airl_ret, 
-                       'bc_ret': ave_bc_ret})
+            
+            if "ground_truth" in methods:
+                ground_truth_percentiles = np.digitize(ground_truth_rets, random_rets_sorted)
+                log_dict['ground_truth_percentiles'] = ground_truth_percentiles
+                
+            if "sirl" in methods:
+                sirl_percentiles = np.digitize(sirl_rets, random_rets_sorted)
+                log_dict['sirl_percentiles'] = sirl_percentiles
+                
+            if "bc" in methods:
+                bc_percentiles = np.digitize(bc_rets, random_rets_sorted)
+                log_dict['bc_percentiles'] = bc_percentiles
+                
+            if "gail" in methods:
+                gail_percentiles = np.digitize(gail_rets, random_rets_sorted)
+                log_dict['gail_percentiles'] = gail_percentiles
+                
+            if "airl" in methods:
+                airl_percentiles = np.digitize(airl_rets, random_rets_sorted)
+                log_dict['airl_percentiles'] = airl_percentiles
+
+        wandb.log(log_dict)
+
 
 if __name__ == "__main__":
     args = parse_args()
