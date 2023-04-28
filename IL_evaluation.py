@@ -193,7 +193,7 @@ def main(args):
         obs_size = 6*25
         horizon = 150
         dtype = int
-    elif "ring" in args.env or "object" in env:
+    elif "ring" in args.env or "object" in args.env:
         obs_size = 2*args.num_rings
         horizon = 50
         dtype = float
@@ -221,7 +221,7 @@ def main(args):
     for rollout_batch, traj_batch, weights in zip(rollout_batches, state_batches, weights):
         if "grid" in args.env:
             ground_truth_env = NewBlockEnv(weights)
-        elif "ring" in args.env or "object" in env:
+        elif "ring" in args.env or "object" in args.env:
             seed = rng.integers(10000)
             ground_truth_env = ObjectEnv(weights, 
                                          num_rings=args.num_rings, 
@@ -255,7 +255,7 @@ def main(args):
         traj_rep = trajectory_encoder(sirl_in).squeeze().detach().numpy()
         if "grid" in args.env:
             pred_env = NewBlockEnv(traj_rep, state_encoder)
-        elif "ring" in args.env or "object" in env:
+        elif "ring" in args.env or "object" in args.env:
             seed = rng.integers(10000)
             pred_env = ObjectEnv(traj_rep,
                                  state_encoder=state_encoder,

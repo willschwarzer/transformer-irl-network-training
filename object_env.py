@@ -87,7 +87,7 @@ class ObjectEnv(gym.Env):
             self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds, self.move_allowance*self.max_move_dist, self.min_block_dist, self.intersection, self.manual_clipping, self.single_move)
             # self.state, reward = _step(self.state, action, self.expanded_object_rewards, self.state_bounds)
         else:
-            self.state = _next_state(self.state, action, self.state_bounds, self.move_allowance, self.single_move)
+            self.state = _next_state(self.state, action, self.state_bounds, self.move_allowance*self.max_move_dist, self.single_move)
             state_rep = self.state_encoder(torch.Tensor(np.asarray(np.reshape(self.state, (-1,)))))
             reward = np.dot(state_rep.detach().cpu().numpy(), self.object_rewards)
 
@@ -203,8 +203,15 @@ def _next_state(state, action, state_bounds, move_allowance, single_move):
             moves *= mask
             move_dists = np.sqrt(np.sum(moves**2, axis=-1))
         total_dist = np.sum(move_dists)
-        moves *= np.minimum(move_allowance/total_dist, 1)
-    state += moves
+        normed_moves = moves * np.minimum(move_allowance/total_dist, 1)
+    print(moves)
+    print(np.minimum(move_allowance/total_dist, 1))
+    print(normed_moves)
+    # print(move_dists)
+    print(move_allowance, total_dist)
+    print(state)
+    state += normed_moves
+    print(state)
     state = np.clip(state, state_bounds[0], state_bounds[1])
     return state
 
