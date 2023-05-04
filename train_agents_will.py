@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument('--wandb-int', action=argparse.BooleanOptionalAction)
     parser.add_argument('--num-rings', default=5, type=int, help="only used for ring env")
     parser.add_argument('--single-move', action=argparse.BooleanOptionalAction, help="only used for ring env")
+    parser.add_argument('--verbose', action=argparse.BooleanOptionalAction, help="whether or not to log")
     args = parser.parse_args()
     args.save_dir == None if args.save_dir.lower() == "none" else args.save_dir
     return args
@@ -61,7 +62,7 @@ if __name__ == '__main__':
     assert 'ring' in args.env or 'object' in args.env, "Need to change block_rewards to object_rewards in other envs"
     n_threads = min(args.max_threads, psutil.cpu_count()-1)
     # ray.init(num_cpus=min(n_threads, NUM_WORKERS_PER_GPU))
-    ray.init(num_cpus=n_threads)
+    ray.init(num_cpus=n_threads, log_to_driver=args.verbose)
     print("XXXXXXXXXXXXXXXXXXXXXXXXXXXX NOT USING GPU XXXXXXXXXXXXXXXXXXXXXXXXXXXX")
     print(ray.available_resources())
     print(psutil.cpu_count())
