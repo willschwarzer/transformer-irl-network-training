@@ -22,7 +22,7 @@ import ray
 import psutil
 from models import *
 
-NUM_TRAJ_PER_REWARD = 100
+NUM_DEM_PER_REWARD = 100
 NUM_AGENTS_PER_GPU = 8
 rng = np.random.default_rng()
 
@@ -45,14 +45,14 @@ def parse_args():
     parser.add_argument('--verbose', '-v', action='store_true')
     parser.add_argument('--wandb-project', type=str, default='sirl')
     parser.add_argument('--permute-types', action='store_true')
-    parser.add_argument('--trajectory-sigmoid', default=False, action=argparse.BooleanOptionalAction)
+    parser.add_argument('--demonstration-sigmoid', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--env', default="rings", type=str)
-    parser.add_argument('--num-trajectory-layers', default=1, type=int)
+    parser.add_argument('--num-demonstration-layers', default=1, type=int)
     parser.add_argument('--num-state-layers', default=1, type=int)
     parser.add_argument('--state-hidden-size', default=64, type=int)
-    parser.add_argument('--trajectory-hidden-size', default=2048, type=int)
-    parser.add_argument('--lstm', action='store_true')
-    parser.add_argument('--trajectory-rep-dim', default=3, type=int)
+    parser.add_argument('--demonstration-hidden-size', default=2048, type=int)
+    parser.add_argument('--dem-encoder-type', type=str, default="transformer", help="transformer or lstm or set_transformer")
+    parser.add_argument('--demonstration-rep-dim', default=3, type=int)
     parser.add_argument('--state-rep-dim', default=3, type=int)
     parser.add_argument('--ground-truth-weights', default=False, action=argparse.BooleanOptionalAction)
     parser.add_argument('--use-shuffled', default=False, action=argparse.BooleanOptionalAction)
@@ -63,9 +63,9 @@ def parse_args():
     # parser.add_argument('--reward-batches', default=False, action=argparse.BooleanOptionalAction)
     # XXX what is reward batches for?
     parser.add_argument('--data-prefix', type=str, default="rings_multimove")
-    parser.add_argument('--iid-traj', default=False, action=argparse.BooleanOptionalAction, help="Don't do batching by task")
-    parser.add_argument('--n', default=1, type=int, help="How many trajectories to train on (if iid traj, must be 1)")
-    parser.add_argument('--rand-n', default=False, action=argparse.BooleanOptionalAction, help="Train on a random number of trajectories within each task and epoch")
+    parser.add_argument('--batch-by-task', default=True, action=argparse.BooleanOptionalAction, help="Do batching by task")
+    parser.add_argument('--n', default=100, type=int, help="How many demonstrations to train on (if not batching by task, must be 1)")
+    parser.add_argument('--rand-n', default=False, action=argparse.BooleanOptionalAction, help="Train on a random number of demonstrations within each task and epoch")
     parser.add_argument('--num-states', type=int, help="Number of iid states to predict rewards of per task (defaults to all)")
     args = parser.parse_args()
     
@@ -74,38 +74,6 @@ def parse_args():
     assert not args.permute_types, "we're not sure this is correct, remember?"
     
     return args
-
-# class OtherPositionalEncoder(nn.Module):
-#     def __init__(self, d_model, dropout=0.1, max_len=5000):
-#         super(OtherPositionalEncoder, self).__init__()
-#         self.dropout = nn.Dropout(p=dropout)
-
-#         pe = torch.zeros(max_len, d_model)
-#         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-#         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-#         pe[:, 0::2] = torch.sin(position * div_term)
-#         pe[:, 1::2] = torch.cos(position * div_term)
-#         pe = pe.unsqueeze(0).transpose(0, 1)
-#         self.register_buffer('pe', pe)
-
-#     def forward(self, x):
-#         r"""Inputs of forward function
-#         Args:
-#             x: the sequence fed to the positional encoder model (required).
-#         Shape:
-#             x: [sequence length, batch size, embed dim]
-#             output: [sequence length, batch size, embed dim]
-#         Examples:
-#             >>> output = pos_encoder(x)
-#         """
-
-#         x = x + self.pe[:x.size(0), :]
-#         return self.dropout(x)        
-
-
-# Try replacing with LSTM
-# Check trajectories (certainly don't have enough cap. to memorize illogical differences in dumb Hs)
-# To that end, should also run on space invaders
     
 class NonlinearDataset(torch.utils.data.Dataset):
     def __init__(self, states, rewards, weights, num_classes=4):
@@ -124,7 +92,7 @@ class NonlinearDataset(torch.utils.data.Dataset):
     
     def __getitem__(self, index):
         if self.weights is not None:
-            return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), self.weights[index].cuda() # returns a whole (L, S), (L, 1) trajectory
+            return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), self.weights[index].cuda() # returns a whole (L, S), (L, 1) demonstration
         else:
             return self.states[index].cuda().to(torch.float), self.rewards[index].cuda(), 0 # 0 here is in effect None, just not allowed to use None
 
@@ -150,48 +118,44 @@ class TaskDataset(torch.utils.data.Dataset):
         return len(self.states)
     
     def __getitem__(self, index):
-        trajs = self.states[index]
-        rewards = self.rewards[index]
+        # Since this is a task dataset, index represents a reward function
+        dems = self.states[index] # (n_examples, L, S)
+        rewards = self.rewards[index] # (n_examples, L)
         if self.rand_n:
-            n = rng.integers(self.n)
+            n = rng.integers(1, self.n, endpoint=True)
         else:
             n = self.n
-        shuffled_trajs = trajs[torch.randperm(len(trajs))]
-        return_trajs = shuffled_trajs[:n]
-        all_states = np.reshape(trajs, (-1, trajs.shape[-1]))
+        shuffled_dems = dems[torch.randperm(len(dems))]
+        return_dems = shuffled_dems[:n]
+        all_states = np.reshape(dems, (-1, dems.shape[-1]))
         all_rewards = np.reshape(rewards, (-1,))
         shuffled_idxs = rng.permutation(np.arange(len(all_states)))
         shuffled_states = all_states[shuffled_idxs]
         shuffled_rewards = all_rewards[shuffled_idxs]
         return_states = shuffled_states[:self.num_states]
         return_rewards = shuffled_rewards[:self.num_states]
-        return_trajs = return_trajs.cuda()
+        return_dems = return_dems.cuda()
         return_states = return_states.cuda()
         return_rewards = return_rewards.cuda()
         if self.weights is not None:
             return_weights = self.weights[index].cuda()
-            return return_trajs, return_states, return_rewards, return_weights
+            return return_dems, return_states, return_rewards, return_weights
         else:
-            return return_trajs, return_states, return_rewards, 0 # 0 here is in effect None, just not allowed to use None
+            return return_dems, return_states, return_rewards, 0 # 0 here is in effect None, just not allowed to use None
     
 def get_splits(args):
     prefix = "data/"
     prefix += "shuffled_" if args.use_shuffled else ""
     state_path = prefix + args.data_prefix + "_states.npy"
     reward_path = prefix + args.data_prefix + "_rewards.npy"
-    # if args.space_invaders:
-    #     state_file = os.path.join('spaceinvaders', f"states_{args.num_examples}.npy")
-    #     reward_file = os.path.join('spaceinvaders', f"rewards_{args.num_examples}.npy")
-    #     assert not args.ground_truth_weights, "not implemented yet"
-    # else:
-    #     state_file = prefix + f"states_{args.num_examples}.npy"
-    #     reward_file = prefix + f"rewards_{args.num_examples}.npy"
+    weight_path = prefix + args.data_prefix + "_weights.npy"
+
     states = np.load(state_path, allow_pickle=True)
     rewards = np.load(reward_path, allow_pickle=True)
     if len(states.shape) == 3:
         # Data is long-form, i.e. not already grouped by task; group by task first
-        assert args.num_examples % NUM_TRAJ_PER_REWARD == 0
-        num_rewards = args.num_examples // NUM_TRAJ_PER_REWARD
+        assert args.num_examples % NUM_DEM_PER_REWARD == 0
+        num_rewards = args.num_examples // NUM_DEM_PER_REWARD
         states_by_reward = np.reshape(states, (num_rewards, -1, states.shape[-2], states.shape[-1]))
         rewards_by_reward = np.reshape(rewards, (num_rewards, -1, rewards.shape[-1]))    
     else:
@@ -199,21 +163,10 @@ def get_splits(args):
         rewards_by_reward = rewards
         num_rewards = len(states_by_reward)
     
-    # XXX pretty sure this isn't correct right now
-    # if args.permute_types:
-    #     for i in range(num_rewards):
-    #         permutation = np.arange(3, 6) if args.space_invaders else np.arange(1, 4)
-    #         rng.shuffle(permutation)
-    #         base_classes = np.arange(3 if args.space_invaders else 1)
-    #         assert not args.space_invaders, "I think the next line is wrong order here"
-    #         permutations_plus = np.concatenate((permutation, base_classes))
-    #         states_by_reward[i] = permutations_plus[states_by_reward[i]]
-    
     # Create train/val split by creating list of task indices, shuffling, and then indexing
     reward_idx_list = np.arange(num_rewards)
     rng.shuffle(reward_idx_list)
     train_length = int(num_rewards*args.train_split)
-    val_length = num_rewards - train_length
     train_idxs = reward_idx_list[:train_length]
     val_idxs = reward_idx_list[train_length:]
     train_states = states_by_reward[train_idxs]
@@ -222,19 +175,16 @@ def get_splits(args):
     val_rewards = rewards_by_reward[val_idxs]
     
     if args.ground_truth_weights or args.rl_evaluation:
-        weights_file = prefix + f"weights_{args.num_examples}.npy"
-        weights = np.load(weights_file, allow_pickle=True)
+        weights = np.load(weight_path, allow_pickle=True)
         weights_by_reward = np.reshape(weights, (num_rewards, -1, weights.shape[-1]))
         train_weights = weights_by_reward[train_idxs]
         train_weights_flattened = np.reshape(train_weights, (-1, train_weights.shape[-1]))
         val_weights = weights_by_reward[val_idxs]
         val_weights_flattened = np.reshape(val_weights, (-1, val_weights.shape[-1]))
     else:
-        train_weights, val_weights, train_weights_flattened, val_weights_flattened = None, None, None, None
-    
-    # TODO non iid_traj one, and add non-flattened weights        
+        train_weights, val_weights, train_weights_flattened, val_weights_flattened = None, None, None, None    
             
-    if args.iid_traj:
+    if not args.batch_by_task:
         # Flatten for final dataloader (can change this eventually if we want to train in pairs or more)
         train_states_flattened = np.reshape(train_states, (-1, train_states.shape[-2], train_states.shape[-1]))
         train_rewards_flattened = np.reshape(train_rewards, (-1, train_rewards.shape[-1]))
@@ -254,10 +204,10 @@ def get_splits(args):
     return train_dataloader, validation_dataloader
 
 @ray.remote(num_gpus=1/NUM_AGENTS_PER_GPU)
-def evaluate_rl(traj_rep, state_encoder, weights):
+def evaluate_rl(dem_rep, state_encoder, weights):
     means = np.zeros((10, 3), dtype=float)
     for i in range(10):
-        pred_env = new_block_env_new.NewBlockEnv(traj_rep, state_encoder)
+        pred_env = new_block_env_new.NewBlockEnv(dem_rep, state_encoder)
         ground_truth_env = new_block_env_new.NewBlockEnv(weights)
         pred_model = stable_baselines3.PPO("MlpPolicy", pred_env, verbose=1)
         pred_model.learn(total_timesteps=100000)
@@ -270,11 +220,11 @@ def evaluate_rl(traj_rep, state_encoder, weights):
         means[i] = [mean_ground_truth_pred_model_ret[0], mean_ground_truth_ret[0], mean_random_ret[0]]
     return np.mean(means, axis=0)
 
-def get_batch_loss(net, optimizer, loss_func, horizon, traj_batch, states_batch, rewards_batch, weights_batch, args, disp=False):
+def get_batch_loss(net, loss_func, dem_batch, states_batch, rewards_batch, weights_batch, args, disp=False):
     if args.ground_truth_weights:
-        prediction = net.forward(states_batch, weights_batch)
+        prediction = net.forward(dem_batch, states_batch, weights_batch)
     else:
-        prediction = net.forward(states_batch)
+        prediction = net.forward(dem_batch, states_batch)
     loss = loss_func(prediction, rewards_batch)
     wandb.log({'train loss': loss})
     # loss.backward()
@@ -283,11 +233,11 @@ def get_batch_loss(net, optimizer, loss_func, horizon, traj_batch, states_batch,
         print("Maximum error: \n", torch.max((prediction-rewards_batch)**2))
         worst = torch.argmax((prediction-rewards_batch)**2)
         print("Argmax of error: \n", prediction.flatten()[worst], rewards_batch.flatten()[worst])
-        print("Trajectory reps: \n", net.trajectory_encoder(states_batch))
+        print("demonstration reps: \n", net.demonstration_encoder(states_batch))
     return loss
 
 def train(args):
-    wandb.init(project='sirl')
+    wandb.init(project=args.wandb_project)
     wandb.config.update(args)
     
     train_dataloader, validation_dataloader = get_splits(args)
@@ -300,24 +250,24 @@ def train(args):
     elif "space" in args.env:
         obs_size = 6*25
         horizon = 150
-    elif "ring" in args.env or "object" in env:
+    elif "ring" in args.env or "object" in args.env:
         obs_size = 2*args.num_rings
         horizon = 50
     else:
         raise NotImplementedError
 
-    net = NonLinearNet(args.trajectory_rep_dim, 
+    net = NonLinearNet(args.demonstration_rep_dim, 
                        args.state_rep_dim, 
                        args.state_hidden_size, 
                        64, 
-                       args.trajectory_hidden_size, 
+                       args.demonstration_hidden_size, 
                        obs_size, 
                        horizon,
-                       args.num_trajectory_layers, 
+                       args.num_demonstration_layers, 
                        args.num_state_layers, 
                        mlp=args.mlp, 
-                       trajectory_sigmoid=args.trajectory_sigmoid, 
-                       lstm=args.lstm,
+                       demonstration_sigmoid=args.demonstration_sigmoid, 
+                       dem_encoder_type=args.dem_encoder_type,
                        ground_truth_phi = args.ground_truth_phi).cuda()
     if args.saved_model:
         net.load_state_dict(torch.load(args.saved_model))
@@ -335,11 +285,11 @@ def train(args):
         n_samples = 0
         net.train()
         with tqdm(train_dataloader, unit="batch") as tepoch:
-            for traj_batch, states_batch, rewards_batch, weights_batch in tepoch:
+            for dem_batch, states_batch, rewards_batch, weights_batch in tepoch:
                 
                 optimizer.zero_grad()
-                loss = get_batch_loss(net, optimizer, loss_func, horizon, traj_batch, states_batch, rewards_batch, weights_batch, args, disp=tepoch.n%100==0)     
-                loss.backward()
+                loss = get_batch_loss(net, loss_func, dem_batch, states_batch, rewards_batch, weights_batch, args, disp=tepoch.n%100==0)     
+                # loss.backward()
                 optimizer.step()
                 
                 tepoch.set_description(f"Epoch {epoch}")
@@ -362,8 +312,8 @@ def train(args):
         net.eval()
         with torch.no_grad():
             with tqdm(validation_dataloader, unit="batch") as tepoch:
-                for traj_batch, states_batch, rewards_batch, weights_batch in tepoch:
-                    loss = get_batch_loss(net, optimizer, loss_func, horizon, traj_batch, states_batch, rewards_batch, weights_batch, args, disp=tepoch.n%100==0) 
+                for dem_batch, states_batch, rewards_batch, weights_batch in tepoch:
+                    loss = get_batch_loss(net, loss_func, dem_batch, states_batch, rewards_batch, weights_batch, args, disp=tepoch.n%100==0) 
                     
                     total_loss += loss.item() * args.batch_size * horizon
                     n_samples += args.batch_size*horizon

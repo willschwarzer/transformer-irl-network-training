@@ -217,7 +217,11 @@ def _next_state(state, action, state_bounds, move_allowance, single_move):
 
 def _get_reward(state, weights, min_block_dist, intersection):
     # state: (num_rings, 2)
-    num_pairs = len(state)*(len(state)-1)//2
+    reward_features = _get_reward_features(state, min_block_dist, intersection)
+    reward = np.sum(reward_features*weights)
+    return reward
+
+def _get_reward_features(state, min_block_dist, intersection):
     obj_matrix_a = np.expand_dims(state, 1)
     obj_matrix_b = np.expand_dims(state, 0)
     squared_diffs = np.power(obj_matrix_a - obj_matrix_b, 2)
@@ -229,5 +233,33 @@ def _get_reward(state, weights, min_block_dist, intersection):
     else:
         clipped_dists = np.clip(dists, a_min=min_block_dist)
     inv_dists = 1/clipped_dists
-    reward = np.sum(inv_dists*weights)
-    return reward
+    return inv_dists
+
+def _get_reward_features_torch(state, min_block_dist, intersection):
+    # With batching
+    # Since this function is meant to be called from outside this class, state might be flattened, not (x, y) pairs
+    # We want to go from (batch_size, L, num_rings*2) to (batch_size, L, num_rings, 2)
+    # breakpoint()
+    state_reshaped = torch.reshape(state, (state.shape[0], state.shape[1], -1, 2))
+    # Get all pairwise distances
+    obj_matrix_a = torch.unsqueeze(state_reshaped, -2)
+    obj_matrix_b = torch.unsqueeze(state_reshaped, -3)
+    squared_diffs = torch.pow(obj_matrix_a - obj_matrix_b, 2)
+    squared_dists = torch.sum(squared_diffs, axis=-1)
+    dists = torch.sqrt(squared_dists)
+    if intersection:
+        # arbitrary large distance for non-intersecting
+        clipped_dists = torch.where(dists <= min_block_dist, min_block_dist, 1000000)
+    else:
+        clipped_dists = torch.clip(dists, a_min=min_block_dist)
+    inv_dists = 1/clipped_dists
+
+    masked_inv_dists = torch.tril(inv_dists, diagonal=-1).cpu() # XXX hardcoded for 5 rings
+    indices = torch.nonzero(masked_inv_dists, as_tuple=True)
+    inverted_array = masked_inv_dists[indices]
+
+    # masked_inv_dists = np.tril(inv_dists.detach().cpu().numpy(), k=-1) # XXX hardcoded for 5 rings
+    # indices = [tuple(index) for index in np.nonzero(masked_inv_dists)]
+    # zipped = list(zip(indices[0], indices[1], indices[2], indices[3]))
+    # inverted_array = masked_inv_dists[zipped]
+    return inverted_array

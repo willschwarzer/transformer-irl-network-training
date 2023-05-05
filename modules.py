@@ -26,15 +26,15 @@ class PositionalEncoder(nn.Module):
             return x
         
 class RewardNet(nn.Module):
-    def __init__(self, trajectory_rep_dim, state_rep_dim, hidden_size):
+    def __init__(self, demonstration_rep_dim, state_rep_dim, hidden_size):
         super().__init__()
-        combined_dim = trajectory_rep_dim + state_rep_dim
+        combined_dim = demonstration_rep_dim + state_rep_dim
         self.linear1 = nn.Linear(combined_dim, hidden_size)
         self.relu = nn.LeakyReLU()
         self.linear2 = nn.Linear(hidden_size, 1)
     
-    def forward(self, trajectory_rep, state_rep):
-        combined_rep = torch.cat((trajectory_rep, state_rep), axis=-1)
+    def forward(self, demonstration_rep, state_rep):
+        combined_rep = torch.cat((demonstration_rep, state_rep), axis=-1)
         x = self.linear1(combined_rep)
         x = self.relu(x)
         x = self.linear2(x)
@@ -56,15 +56,15 @@ class StateNet(nn.Module):
         return self.net(state)
     
     
-class TrajectoryNetTransformer(nn.Module):
-    def __init__(self, obs_size, horizon, num_transformer_layers, trajectory_hidden_size, trajectory_rep_dim, sigmoid=True):
+class DemonstrationNetTransformer(nn.Module):
+    def __init__(self, obs_size, horizon, num_transformer_layers, demonstration_hidden_size, demonstration_rep_dim, sigmoid=True):
         super().__init__()
         self.positional_encoder = PositionalEncoder(obs_size, max_seq_len=horizon+1) # not sure why this is +1 but we'll go with what we had
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=obs_size, nhead=10, dim_feedforward=trajectory_hidden_size, batch_first=True)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=obs_size, nhead=10, dim_feedforward=demonstration_hidden_size, batch_first=True)
         self.transformer = nn.TransformerEncoder(self.encoder_layer, num_layers=num_transformer_layers)
         self.linear1 = nn.Linear(obs_size, 50)
         self.relu = nn.LeakyReLU()
-        self.linear2 = nn.Linear(50, trajectory_rep_dim)
+        self.linear2 = nn.Linear(50, demonstration_rep_dim)
         self.sigmoid = nn.Sigmoid() if sigmoid else nn.Identity()
         self.obs_size = obs_size
         self.horizon = horizon
@@ -91,7 +91,7 @@ class TrajectoryNetTransformer(nn.Module):
         x = self.sigmoid(x)
         return x
     
-class TrajectoryNetLSTM(nn.Module):
+class DemonstrationNetLSTM(nn.Module):
     def __init__(self, obs_size, num_lstm_layers):
         super().__init__()
         self.lstm = nn.LSTM(25*obs_size, 2048, num_lstm_layers, batch_first=True)
