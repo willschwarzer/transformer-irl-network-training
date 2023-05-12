@@ -58,12 +58,13 @@ class NonLinearNet(nn.Module):
     def forward(self, demonstrations, states, weights=None):
         # demonstrations: (bsize, L, |S|) or (bsize, n, L, |S|)
         if weights is None:
-            demonstration_rep = self.demonstration_encoder(demonstrations).squeeze() # (bsize, rep_dim)
+            demonstration_rep = self.demonstration_encoder(demonstrations.squeeze()).squeeze() # (bsize, rep_dim)
         else:
             demonstration_rep = weights.squeeze() # (bsize, rep_dim)
         # states = demonstrations.view(-1, demonstrations.shape[-1]) # (bsize*L, |S|)
         if not self.ground_truth_phi:
             state_rep = self.state_encoder(states) # (bsize*L, rep_dim)
+            state_rep = state_rep.view(-1, state_rep.shape[-1]) # (bsize*L, rep_dim)
         else:
             # This was for the 5x5 gridworld
             # states_unflattened = states.view(-1, 25, 4)
@@ -74,15 +75,16 @@ class NonLinearNet(nn.Module):
 
             # For the rings environment:
             # breakpoint()
+            breakpoint()
             state_rep = _get_reward_features_torch(states, self.MIN_OBJECT_DIST, True) # (bsize, num_states, 5, 5)
+            state_rep = state_rep.view(-1, state_rep.shape[-1]) # (bsize*L, rep_dim)
             # tril = torch.tril(torch.ones([5, 5]), diagonal=-1).cuda()
             # expanded_demonstration_rep = torch.zeros_like(tril)
             # expanded_demonstration_rep[torch.nonzero(tril)] = expanded_demonstration_rep
             # reward = torch.sum(state_rep*expanded_demonstration_rep, dim=(2, 3))
         # If the batch size was 1, unsqueeze demonstration_rep to make it 2D
-        breakpoint()
-        if demonstrations.shape[0] == 1:
-            demonstration_rep = demonstration_rep.unsqueeze(0)
+        # if demonstrations.shape[0] == 1:
+        #     demonstration_rep = demonstration_rep.unsqueeze(0)
         demonstration_rep_expanded = demonstration_rep.unsqueeze(1).expand(-1, self.horizon, -1) # (bsize, L, rep_dim)
         demonstration_rep_flattened = demonstration_rep_expanded.reshape(-1, demonstration_rep_expanded.shape[-1]) # (bsize*L, rep_dim)
         if self.mlp:

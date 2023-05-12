@@ -254,12 +254,13 @@ def _get_reward_features_torch(state, min_block_dist, intersection):
         clipped_dists = torch.clip(dists, a_min=min_block_dist)
     inv_dists = 1/clipped_dists
 
-    masked_inv_dists = torch.tril(inv_dists, diagonal=-1).cpu() # XXX hardcoded for 5 rings
+    masked_inv_dists = torch.tril(inv_dists, diagonal=-1) # XXX hardcoded for 5 rings
     indices = torch.nonzero(masked_inv_dists, as_tuple=True)
     inverted_array = masked_inv_dists[indices]
+    inverted_array_reshaped = inverted_array.reshape((state.shape[0], state.shape[1], -1))
 
     # masked_inv_dists = np.tril(inv_dists.detach().cpu().numpy(), k=-1) # XXX hardcoded for 5 rings
     # indices = [tuple(index) for index in np.nonzero(masked_inv_dists)]
     # zipped = list(zip(indices[0], indices[1], indices[2], indices[3]))
     # inverted_array = masked_inv_dists[zipped]
-    return inverted_array
+    return inverted_array_reshaped
