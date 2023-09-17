@@ -18,6 +18,7 @@ class NonLinearNet(nn.Module):
                  num_demonstration_layers, 
                  num_state_layers, 
                  dem_encoder_type='transformer',
+                 dem_combiner_type='sum',
                  mlp=False, 
                  demonstration_sigmoid=False, 
                  ground_truth_phi=False):
@@ -28,10 +29,20 @@ class NonLinearNet(nn.Module):
             self.demonstration_encoder = DemonstrationNetLSTM(obs_size, num_demonstration_layers)
         elif dem_encoder_type == 'transformer':
             self.demonstration_encoder = DemonstrationNetTransformer(obs_size, horizon, num_demonstration_layers, demonstration_hidden_size, demonstration_rep_dim, demonstration_sigmoid)
-        elif dem_encoder_type == 'set_transformer':
-            self.demonstration_encoder = SetTransformer(obs_size, 1, demonstration_rep_dim)
         else:
             raise ValueError("Invalid demonstration encoder type!")
+        
+        if dem_combiner_type == 'sum':
+            self.demonstration_combiner = torch.sum
+        elif dem_combiner_type == 'mean':
+            self.demonstration_combiner = torch.mean
+        elif dem_combiner_type == 'max':
+            self.demonstration_combiner = torch.max
+        elif dem_combiner_type == 'set_transformer':
+            self.demonstration_combiner = SetTransformer(demonstration_rep_dim, 1, demonstration_rep_dim)
+        else:
+            raise ValueError("Invalid demonstration combiner type!")
+
         # self.demonstration_encoder = SIDemonstrationNet()
         self.state_encoder = StateNet(state_rep_dim, state_hidden_size, num_state_layers, obs_size)
         self.mlp = mlp
