@@ -90,5 +90,5 @@ class NonLinearNet(nn.Module):
         if self.mlp:
             reward = self.reward_layer(demonstration_rep_flattened, state_rep)
         else:
-            reward = torch.einsum('bs,bs->b', demonstration_rep_flattened, state_rep)
+            reward = torch.matmul(demonstration_rep_flattened, state_rep.T)
         return reward.view(demonstrations.shape[0], -1)
